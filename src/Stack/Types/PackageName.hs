@@ -101,15 +101,15 @@ mkPackageName s =
 
 -- | Parse a package name from a 'Text'.
 parsePackageName :: MonadThrow m => Text -> m PackageName
-parsePackageName =
-  parsePackageNameFromString . T.unpack
+parsePackageName x = go x
+  where go =
+          either (const (throwM (PackageNameParseFail x))) return .
+          parseOnly (packageNameParser <* endOfInput)
 
 -- | Parse a package name from a 'String'.
 parsePackageNameFromString :: MonadThrow m => String -> m PackageName
-parsePackageNameFromString x = go . T.pack $ x
-  where go =
-          either (const (throwM (PackageNameParseFail (T.pack x)))) return .
-          parseOnly (packageNameParser <* endOfInput)
+parsePackageNameFromString =
+  parsePackageName . T.pack
 
 -- | Produce a string representation of a package name.
 packageNameString :: PackageName -> String
