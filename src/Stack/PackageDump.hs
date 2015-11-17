@@ -313,7 +313,7 @@ conduitDumpPackage = (=$= CL.catMaybes) $ eachSection $ do
         parseDepend :: MonadThrow m => ByteString -> m (Maybe GhcPkgId)
         parseDepend "builtin_rts" = return Nothing
         parseDepend bs =
-            liftM Just $ parseGhcPkgId bs'
+            liftM Just $ parseGhcPkgId (T.decodeUtf8 bs')
           where
             (bs', _builtinRts) =
                 case stripSuffixBS " builtin_rts" bs of
@@ -327,7 +327,7 @@ conduitDumpPackage = (=$= CL.catMaybes) $ eachSection $ do
         _ -> do
             name <- parseS "name" >>= parsePackageName . T.decodeUtf8
             version <- parseS "version" >>= parseVersion . T.decodeUtf8
-            ghcPkgId <- parseS "id" >>= parseGhcPkgId
+            ghcPkgId <- parseS "id" >>= parseGhcPkgId . T.decodeUtf8
 
             -- if a package has no modules, these won't exist
             let libDirKey = "library-dirs"
