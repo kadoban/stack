@@ -50,6 +50,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Monoid
 import           Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 
 import           Data.Traversable (forM)
 
@@ -144,13 +145,14 @@ populateCache menv index = do
       where
         (y, z) = S.break (== Word8._slash) x
 
+    -- TODO: handling of unicode in this seems iffy, need to look into it more
     parseNameVersion t1 = do
         (p', t3) <- breakSlash
                   $ S.map (\c -> if c == Word8._backslash then Word8._slash else c)
                   $ S8.pack t1
-        p <- parsePackageName p'
+        p <- parsePackageName $ T.decodeUtf8 p'
         (v', t5) <- breakSlash t3
-        v <- parseVersion v'
+        v <- parseVersion $ T.decodeUtf8 v'
         let (t6, suffix) = S.break (== Word8._period) t5
         if t6 == p'
             then return (PackageIdentifier p v, suffix)
