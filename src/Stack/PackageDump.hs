@@ -325,8 +325,8 @@ conduitDumpPackage = (=$= CL.catMaybes) $ eachSection $ do
     case Map.lookup "id" m of
         Just ["builtin_rts"] -> return Nothing
         _ -> do
-            name <- parseS "name" >>= parsePackageName
-            version <- parseS "version" >>= parseVersion
+            name <- parseS "name" >>= parsePackageName . T.decodeUtf8
+            version <- parseS "version" >>= parseVersion . T.decodeUtf8
             ghcPkgId <- parseS "id" >>= parseGhcPkgId
 
             -- if a package has no modules, these won't exist

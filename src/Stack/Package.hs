@@ -63,7 +63,7 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Text (Text)
 import qualified Data.Text as T
-import           Data.Text.Encoding (decodeUtf8, decodeUtf8With)
+import           Data.Text.Encoding (decodeUtf8, decodeUtf8With, encodeUtf8)
 import           Data.Text.Encoding.Error (lenientDecode)
 import           Data.Version (showVersion)
 import           Distribution.Compiler
@@ -448,7 +448,7 @@ packageDependencies =
 packageToolDependencies :: PackageDescription -> Map BS.ByteString VersionRange
 packageToolDependencies =
   M.fromList .
-  concatMap (fmap (packageNameByteString . depName &&& depRange) .
+  concatMap (fmap (encodeUtf8 . packageNameText . depName &&& depRange) .
              buildTools) .
   allBuildInfo'
 
