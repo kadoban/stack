@@ -180,7 +180,7 @@ constructPlan mbp0 baseConfigOpts0 locals extraToBuild0 localDumpPkgs loadPackag
         , combinedMap = combineMap sourceMap installedMap
         , toolToPackages = \ (Dependency name _) ->
           maybe Map.empty (Map.fromSet (const anyVersion)) $
-          Map.lookup (S8.pack . packageNameString . fromCabalPackageName $ name) toolMap
+          Map.lookup (T.pack . packageNameString . fromCabalPackageName $ name) toolMap
         , ctxEnvConfig = econfig
         , callStack = []
         , extraToBuild = extraToBuild0
