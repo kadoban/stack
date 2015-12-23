@@ -26,9 +26,19 @@ class Repository r where
                                        liftIO $ T.readFile
                                                      (toFilePath $ dir </> file)
     repoType :: r -> String
+    -- ^ A short, one-word, lowercase word describing the repo type.
+    -- It should not contain anything but lowercase ASCII letters
     fullUri :: r -> String
+    -- ^ Whatever String best uniquely represents the URL of the remote
+    -- repository that's being referred to. It should not include
+    -- information about what specific version is being referred to.
     parseRepo :: (MonadThrow m)
-              => String -> Maybe String -> m r
+              => String
+              -- ^ The URL, in whatever format the repository likes
+              -> Maybe String
+              -- ^ A version, if a specific one is desired other than
+              -- whatever default makes sense with the repository
+              -> m r
     {-# MINIMAL repoType
               , fullUri
               , parseRepo
