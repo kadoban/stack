@@ -10,8 +10,6 @@ module Stack.Repository where
 
 import           Control.Monad.Catch (MonadCatch, MonadThrow, Exception, throwM)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Data.Text (Text)
-import qualified Data.Text.IO as T
 import           Path
 import           Path.IO (createTree)
 
@@ -20,11 +18,8 @@ class Repository r where
               => CacheLoc -> UseNetwork -> r -> m ()
     cacheRepo _ _ _ = throwM (NotSupported FullCache)
     cacheRepoFile :: (MonadIO m, MonadThrow m, MonadCatch m)
-                  => CacheLoc -> UseNetwork -> r -> Path Rel File -> m Text
-    cacheRepoFile cache online repo file
-        = do cacheRepo cache online repo
-             dir <- cacheTo cache repo
-             liftIO $ T.readFile (toFilePath $ dir </> file)
+                  => CacheLoc -> UseNetwork -> r -> Path Rel File -> m ()
+    cacheRepoFile cache online repo _ = cacheRepo cache online repo
     repoType :: r -> String
     -- ^ A short, one-word, lowercase word describing the repo type.
     -- It should not contain anything but lowercase ASCII letters
