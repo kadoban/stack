@@ -8,7 +8,7 @@
 --
 module Stack.Repository where
 
-import           Control.Monad.Catch (MonadCatch, MonadThrow)
+import           Control.Monad.Catch (MonadCatch, MonadThrow, Exception, throwM)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.Text (Text)
 import qualified Data.Text.IO as T
@@ -17,6 +17,7 @@ import           Path
 class Repository r where
     cacheRepo :: (MonadIO m, MonadThrow m, MonadCatch m)
               => CacheLoc -> r -> m ()
+    cacheRepo _ _ = throwM (NotSupported FullCache)
     cacheRepoFile :: (MonadIO m, MonadThrow m, MonadCatch m)
                   => CacheLoc -> r -> Path Rel File -> m Text
     cacheRepoFile cache repo file = do cacheRepo cache repo
@@ -36,6 +37,17 @@ cacheTo (DirectlyIn a) _ = return a
 cacheTo (OrganizeIn a) r = (a </>) <$> cacheTo' r
 
 data CacheLoc = DirectlyIn (Path Abs Dir) | OrganizeIn (Path Abs Dir)
+    deriving (Eq, Ord, Show)
+
+data RepositoryException
+        = NotSupported Feature
+        | RemoteNotCorrectType String
+        | ToolNotAvailable
+    deriving (Eq, Ord, Show)
+
+instance Exception RepositoryException
+
+data Feature = FullCache
     deriving (Eq, Ord, Show)
 
 data GitRepo = GitRepo String         -- ^ URL of the remote repository
