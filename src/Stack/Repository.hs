@@ -29,6 +29,10 @@ class Repository r where
     fullUri :: r -> String
     parseRepo :: (MonadThrow m)
               => String -> Maybe String -> m r
+    {-# MINIMAL repoType
+              , fullUri
+              , parseRepo
+              , (cacheRepo | cacheRepoFile) #-}
 
 cacheTo' :: (MonadThrow m, Repository r) => r -> m (Path Rel Dir)
 cacheTo' = undefined
