@@ -69,6 +69,7 @@ library
                      Stack.Package
                      Stack.PackageDump
                      Stack.PackageIndex
+                     Stack.Repository
                      Stack.Ghci
                      Stack.Ide
                      Stack.Image
