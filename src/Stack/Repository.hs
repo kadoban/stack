@@ -13,6 +13,7 @@ import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.Text (Text)
 import qualified Data.Text.IO as T
 import           Path
+import           Path.IO (createTree)
 
 class Repository r where
     cacheRepo :: (MonadIO m, MonadThrow m, MonadCatch m)
@@ -66,3 +67,5 @@ instance Repository GitRepo where
     repoType _ = "git"
     fullUri (GitRepo s _) = s
     parseRepo url ver = return $ GitRepo url ver
+    cacheRepo cache repo = do dir <- cacheTo cache repo
+                              createTree dir
