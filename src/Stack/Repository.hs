@@ -17,14 +17,14 @@ import           Path.IO (createTree)
 
 class Repository r where
     cacheRepo :: (MonadIO m, MonadThrow m, MonadCatch m)
-              => CacheLoc -> r -> m ()
-    cacheRepo _ _ = throwM (NotSupported FullCache)
+              => CacheLoc -> UseNetwork -> r -> m ()
+    cacheRepo _ _ _ = throwM (NotSupported FullCache)
     cacheRepoFile :: (MonadIO m, MonadThrow m, MonadCatch m)
-                  => CacheLoc -> r -> Path Rel File -> m Text
-    cacheRepoFile cache repo file = do cacheRepo cache repo
-                                       dir <- cacheTo cache repo
-                                       liftIO $ T.readFile
-                                                     (toFilePath $ dir </> file)
+                  => CacheLoc -> UseNetwork -> r -> Path Rel File -> m Text
+    cacheRepoFile cache online repo file
+        = do cacheRepo cache online repo
+             dir <- cacheTo cache repo
+             liftIO $ T.readFile (toFilePath $ dir </> file)
     repoType :: r -> String
     -- ^ A short, one-word, lowercase word describing the repo type.
     -- It should not contain anything but lowercase ASCII letters
@@ -54,10 +54,14 @@ cacheTo (OrganizeIn a) r = (a </>) <$> cacheTo' r
 data CacheLoc = DirectlyIn (Path Abs Dir) | OrganizeIn (Path Abs Dir)
     deriving (Eq, Ord, Show)
 
+data UseNetwork = Online | Offline
+    deriving (Eq, Ord, Show, Enum, Bounded)
+
 data RepositoryException
         = NotSupported Feature
         | RemoteNotCorrectType String
         | ToolNotAvailable
+        | NotCached
     deriving (Eq, Ord, Show)
 
 instance Exception RepositoryException
@@ -81,7 +85,7 @@ instance Repository GitRepo where
     repoType _ = "git"
     fullUri (GitRepo s _) = s
     parseRepo url ver = return $ GitRepo url ver
-    cacheRepo cache repo =
+    cacheRepo cache _ repo =
       do createCacheTree cache repo
 
 createCacheTree :: (MonadIO m, MonadThrow m, Repository r)
