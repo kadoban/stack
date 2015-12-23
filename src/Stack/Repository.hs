@@ -81,5 +81,9 @@ instance Repository GitRepo where
     repoType _ = "git"
     fullUri (GitRepo s _) = s
     parseRepo url ver = return $ GitRepo url ver
-    cacheRepo cache repo = do dir <- cacheTo cache repo
-                              createTree dir
+    cacheRepo cache repo =
+      do createCacheTree cache repo
+
+createCacheTree :: (MonadIO m, MonadThrow m, Repository r)
+                => CacheLoc -> r -> m ()
+createCacheTree cache repo = cacheTo cache repo >>= createTree
