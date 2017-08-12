@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -27,15 +28,10 @@ module Stack.Types.Config.Build
     )
     where
 
-import           Control.Applicative
 import           Data.Aeson.Extended
-import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Monoid
-import           Data.Text (Text)
-import           GHC.Generics (Generic)
 import           Generics.Deriving.Monoid (memptydefault, mappenddefault)
-import           Prelude -- Fix AMP warning
+import           Stack.Prelude
 import           Stack.Types.FlagName
 import           Stack.Types.PackageName
 
@@ -56,6 +52,9 @@ data BuildOpts =
             -- ^ Build haddocks for dependencies?
             ,boptsHaddockInternal :: !Bool
             -- ^ Build haddocks for all symbols and packages, like @cabal haddock --internal@
+            ,boptsHaddockHyperlinkSource  :: !Bool
+            -- ^ Build hyperlinked source if possible. Fallback to
+            -- @hscolour@. Disable for no sources.
             ,boptsInstallExes :: !Bool
             -- ^ Install executables to user path after building?
             ,boptsInstallCompilerTool :: !Bool
@@ -85,6 +84,8 @@ data BuildOpts =
             -- ^ Ask Cabal to be verbose in its builds
             ,boptsSplitObjs :: !Bool
             -- ^ Whether to enable split-objs.
+            ,boptsSkipComponents :: ![Text]
+            -- ^ Which components to skip when building
             }
   deriving (Show)
 
@@ -99,6 +100,7 @@ defaultBuildOpts = BuildOpts
     , boptsOpenHaddocks = False
     , boptsHaddockDeps = Nothing
     , boptsHaddockInternal = False
+    , boptsHaddockHyperlinkSource = True
     , boptsInstallExes = False
     , boptsInstallCompilerTool = False
     , boptsPreFetch = False
@@ -111,6 +113,7 @@ defaultBuildOpts = BuildOpts
     , boptsReconfigure = False
     , boptsCabalVerbose = False
     , boptsSplitObjs = False
+    , boptsSkipComponents = []
     }
 
 defaultBuildOptsCLI ::BuildOptsCLI
@@ -152,7 +155,10 @@ data BuildCommand
 
 -- | Build options that may be specified in the stack.yaml or from the CLI
 data BuildOptsMonoid = BuildOptsMonoid
-    { buildMonoidLibProfile :: !(First Bool)
+    { buildMonoidTrace :: !Any
+    , buildMonoidProfile :: !Any
+    , buildMonoidNoStrip :: !Any
+    , buildMonoidLibProfile :: !(First Bool)
     , buildMonoidExeProfile :: !(First Bool)
     , buildMonoidLibStrip :: !(First Bool)
     , buildMonoidExeStrip :: !(First Bool)
@@ -161,6 +167,7 @@ data BuildOptsMonoid = BuildOptsMonoid
     , buildMonoidOpenHaddocks :: !(First Bool)
     , buildMonoidHaddockDeps :: !(First Bool)
     , buildMonoidHaddockInternal :: !(First Bool)
+    , buildMonoidHaddockHyperlinkSource :: !(First Bool)
     , buildMonoidInstallExes :: !(First Bool)
     , buildMonoidInstallCompilerTool :: !(First Bool)
     , buildMonoidPreFetch :: !(First Bool)
@@ -173,11 +180,15 @@ data BuildOptsMonoid = BuildOptsMonoid
     , buildMonoidReconfigure :: !(First Bool)
     , buildMonoidCabalVerbose :: !(First Bool)
     , buildMonoidSplitObjs :: !(First Bool)
+    , buildMonoidSkipComponents :: ![Text]
     } deriving (Show, Generic)
 
 instance FromJSON (WithJSONWarnings BuildOptsMonoid) where
   parseJSON = withObjectWarnings "BuildOptsMonoid"
-    (\o -> do buildMonoidLibProfile <- First <$> o ..:? buildMonoidLibProfileArgName
+    (\o -> do let buildMonoidTrace = Any False
+                  buildMonoidProfile = Any False
+                  buildMonoidNoStrip = Any False
+              buildMonoidLibProfile <- First <$> o ..:? buildMonoidLibProfileArgName
               buildMonoidExeProfile <-First <$>  o ..:? buildMonoidExeProfileArgName
               buildMonoidLibStrip <- First <$> o ..:? buildMonoidLibStripArgName
               buildMonoidExeStrip <-First <$>  o ..:? buildMonoidExeStripArgName
@@ -186,6 +197,7 @@ instance FromJSON (WithJSONWarnings BuildOptsMonoid) where
               buildMonoidOpenHaddocks <- First <$> o ..:? buildMonoidOpenHaddocksArgName
               buildMonoidHaddockDeps <- First <$> o ..:? buildMonoidHaddockDepsArgName
               buildMonoidHaddockInternal <- First <$> o ..:? buildMonoidHaddockInternalArgName
+              buildMonoidHaddockHyperlinkSource <- First <$> o ..:? buildMonoidHaddockHyperlinkSourceArgName
               buildMonoidInstallExes <- First <$> o ..:? buildMonoidInstallExesArgName
               buildMonoidInstallCompilerTool <- First <$> o ..:? buildMonoidInstallCompilerToolArgName
               buildMonoidPreFetch <- First <$> o ..:? buildMonoidPreFetchArgName
@@ -198,6 +210,7 @@ instance FromJSON (WithJSONWarnings BuildOptsMonoid) where
               buildMonoidReconfigure <- First <$> o ..:? buildMonoidReconfigureArgName
               buildMonoidCabalVerbose <- First <$> o ..:? buildMonoidCabalVerboseArgName
               buildMonoidSplitObjs <- First <$> o ..:? buildMonoidSplitObjsName
+              buildMonoidSkipComponents <- o ..:? buildMonoidSkipComponentsName ..!= mempty
               return BuildOptsMonoid{..})
 
 buildMonoidLibProfileArgName :: Text
@@ -226,6 +239,9 @@ buildMonoidHaddockDepsArgName = "haddock-deps"
 
 buildMonoidHaddockInternalArgName :: Text
 buildMonoidHaddockInternalArgName = "haddock-internal"
+
+buildMonoidHaddockHyperlinkSourceArgName :: Text
+buildMonoidHaddockHyperlinkSourceArgName = "haddock-hyperlink-source"
 
 buildMonoidInstallExesArgName :: Text
 buildMonoidInstallExesArgName = "copy-bins"
@@ -262,6 +278,9 @@ buildMonoidCabalVerboseArgName = "cabal-verbose"
 
 buildMonoidSplitObjsName :: Text
 buildMonoidSplitObjsName = "split-objs"
+
+buildMonoidSkipComponentsName :: Text
+buildMonoidSkipComponentsName = "skip-components"
 
 instance Monoid BuildOptsMonoid where
     mempty = memptydefault
@@ -327,12 +346,12 @@ instance Monoid TestOptsMonoid where
 
 
 -- | Haddock Options
-data HaddockOpts =
-  HaddockOpts { hoAdditionalArgs :: ![String] -- ^ Arguments passed to haddock program
+newtype HaddockOpts =
+  HaddockOpts { hoAdditionalArgs :: [String] -- ^ Arguments passed to haddock program
               } deriving (Eq,Show)
 
-data HaddockOptsMonoid =
-  HaddockOptsMonoid {hoMonoidAdditionalArgs :: ![String]
+newtype HaddockOptsMonoid =
+  HaddockOptsMonoid {hoMonoidAdditionalArgs :: [String]
                     } deriving (Show, Generic)
 
 defaultHaddockOpts :: HaddockOpts

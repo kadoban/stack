@@ -1,8 +1,8 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stack.Options.DockerParser where
 
 import           Data.Char
 import           Data.List                         (intercalate)
-import           Data.Monoid.Extra
 import qualified Data.Text                         as T
 import           Distribution.Version              (anyVersion)
 import           Options.Applicative
@@ -11,6 +11,7 @@ import           Options.Applicative.Builder.Extra
 import           Stack.Constants
 import           Stack.Docker
 import qualified Stack.Docker                      as Docker
+import           Stack.Prelude
 import           Stack.Options.Utils
 import           Stack.Types.Version
 import           Stack.Types.Docker
@@ -65,6 +66,7 @@ dockerOptsParser hide0 =
     <*> many (option auto (long (dockerOptName dockerMountArgName) <>
                            hide <>
                            metavar "(PATH | HOST-PATH:CONTAINER-PATH)" <>
+                           completer dirCompleter <>
                            help ("Mount volumes from host in container " ++
                                  "(may specify multiple times)")))
     <*> many (option str (long (dockerOptName dockerEnvArgName) <>
@@ -78,13 +80,15 @@ dockerOptsParser hide0 =
              metavar "PATH" <>
              help "Location of image usage tracking database"))
     <*> optionalFirst (option (eitherReader' parseDockerStackExe)
-            (long(dockerOptName dockerStackExeArgName) <>
+            (let specialOpts =
+                     [ dockerStackExeDownloadVal
+                     , dockerStackExeHostVal
+                     , dockerStackExeImageVal
+                     ] in
+             long(dockerOptName dockerStackExeArgName) <>
              hide <>
-             metavar (intercalate "|"
-                          [ dockerStackExeDownloadVal
-                          , dockerStackExeHostVal
-                          , dockerStackExeImageVal
-                          , "PATH" ]) <>
+             metavar (intercalate "|" (specialOpts ++ ["PATH"])) <>
+             completer (listCompleter specialOpts <> fileCompleter) <>
              help (concat [ "Location of "
                           , stackProgName
                           , " executable used in container" ])))

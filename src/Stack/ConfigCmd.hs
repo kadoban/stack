@@ -1,8 +1,10 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE GADTs #-}
 
 -- | Make changes to project or global configuration.
 module Stack.ConfigCmd
@@ -12,25 +14,18 @@ module Stack.ConfigCmd
        ,cfgCmdSetName
        ,cfgCmdName) where
 
-import           Control.Applicative
-import           Control.Monad
-import           Control.Monad.Catch (throwM)
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Reader (asks)
+import           Stack.Prelude
 import qualified Data.ByteString as S
 import qualified Data.HashMap.Strict as HMap
-import           Data.Monoid
-import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Yaml as Yaml
 import qualified Options.Applicative as OA
 import qualified Options.Applicative.Types as OA
 import           Path
-import           Prelude -- Silence redundant import warnings
-import           Stack.BuildPlan
-import           Stack.Config (makeConcreteResolver, getStackYaml)
-import           Stack.Types.BuildPlan
+import           Path.IO
+import           Stack.Config (makeConcreteResolver, getProjectConfig, getImplicitGlobalProjectDir, LocalConfigStatus(..))
+import           Stack.Constants
+import           Stack.Snapshot (loadResolver)
 import           Stack.Types.Config
 import           Stack.Types.Resolver
 
@@ -54,42 +49,46 @@ configCmdSetScope (ConfigCmdSetSystemGhc scope _) = scope
 configCmdSetScope (ConfigCmdSetInstallGhc scope _) = scope
 
 cfgCmdSet
-    :: (StackMiniM env m, HasConfig env, HasGHCVariant env)
-    => ConfigCmdSet -> m ()
-cfgCmdSet cmd = do
+    :: (HasConfig env, HasGHCVariant env)
+    => GlobalOpts -> ConfigCmdSet -> RIO env ()
+cfgCmdSet go cmd = do
+    conf <- view configL
     configFilePath <-
-        liftM
-            toFilePath
-            (case configCmdSetScope cmd of
-                 CommandScopeProject -> getStackYaml
-                 CommandScopeGlobal -> asks (configUserConfigPath . getConfig))
+             case configCmdSetScope cmd of
+                 CommandScopeProject -> do
+                     mstackYamlOption <- forM (globalStackYaml go) resolveFile'
+                     mstackYaml <- getProjectConfig mstackYamlOption
+                     case mstackYaml of
+                         LCSProject stackYaml -> return stackYaml
+                         LCSNoProject -> liftM (</> stackDotYaml) (getImplicitGlobalProjectDir conf)
+                         LCSNoConfig _ -> throwString "config command used when no local configuration available"
+                 CommandScopeGlobal -> return (configUserConfigPath conf)
     -- We don't need to worry about checking for a valid yaml here
     (config :: Yaml.Object) <-
-        liftIO (Yaml.decodeFileEither configFilePath) >>= either throwM return
-    newValue <- cfgCmdSetValue cmd
+        liftIO (Yaml.decodeFileEither (toFilePath configFilePath)) >>= either throwM return
+    newValue <- cfgCmdSetValue (parent configFilePath) cmd
     let cmdKey = cfgCmdSetOptionName cmd
         config' = HMap.insert cmdKey newValue config
     if config' == config
         then $logInfo
-                 (T.pack configFilePath <>
+                 (T.pack (toFilePath configFilePath) <>
                   " already contained the intended configuration and remains unchanged.")
         else do
-            liftIO (S.writeFile configFilePath (Yaml.encode config'))
-            $logInfo (T.pack configFilePath <> " has been updated.")
+            liftIO (S.writeFile (toFilePath configFilePath) (Yaml.encode config'))
+            $logInfo (T.pack (toFilePath configFilePath) <> " has been updated.")
 
 cfgCmdSetValue
-    :: (StackMiniM env m, HasConfig env, HasGHCVariant env)
-    => ConfigCmdSet -> m Yaml.Value
-cfgCmdSetValue (ConfigCmdSetResolver newResolver) = do
-    -- TODO: custom snapshot support?
-    newResolverText <- fmap resolverName (makeConcreteResolver newResolver)
-    -- We checking here that the snapshot actually exists
-    snap <- parseSnapName newResolverText
-    _ <- loadMiniBuildPlan snap
-    return (Yaml.String newResolverText)
-cfgCmdSetValue (ConfigCmdSetSystemGhc _ bool) =
+    :: (HasConfig env, HasGHCVariant env)
+    => Path Abs Dir -- ^ root directory of project
+    -> ConfigCmdSet -> RIO env Yaml.Value
+cfgCmdSetValue root (ConfigCmdSetResolver newResolver) = do
+    concreteResolver <- makeConcreteResolver (Just root) newResolver
+    -- Check that the snapshot actually exists
+    void $ loadResolver concreteResolver
+    return (Yaml.toJSON concreteResolver)
+cfgCmdSetValue _ (ConfigCmdSetSystemGhc _ bool) =
     return (Yaml.Bool bool)
-cfgCmdSetValue (ConfigCmdSetInstallGhc _ bool) =
+cfgCmdSetValue _ (ConfigCmdSetInstallGhc _ bool) =
     return (Yaml.Bool bool)
 
 cfgCmdSetOptionName :: ConfigCmdSet -> Text
@@ -149,4 +148,4 @@ readBool = do
         _ -> OA.readerError ("Invalid value " ++ show s ++ ": Expected \"true\" or \"false\"")
 
 boolArgument :: OA.Parser Bool
-boolArgument = OA.argument readBool (OA.metavar "true/false")
+boolArgument = OA.argument readBool (OA.metavar "true|false" <> OA.completeWith ["true", "false"])

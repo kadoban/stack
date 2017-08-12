@@ -1,4 +1,6 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds       #-}
+{-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -8,6 +10,7 @@
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TupleSections         #-}
+{-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE PackageImports        #-}
 {-# LANGUAGE ViewPatterns          #-}
 
@@ -15,6 +18,7 @@
 
 module Stack.Fetch
     ( unpackPackages
+    , unpackPackageIdent
     , unpackPackageIdents
     , fetchPackages
     , untar
@@ -29,51 +33,26 @@ import qualified    Codec.Archive.Tar as Tar
 import qualified    Codec.Archive.Tar.Check as Tar
 import qualified    Codec.Archive.Tar.Entry as Tar
 import              Codec.Compression.GZip (decompress)
-import              Control.Applicative
-import              Control.Concurrent.Async (Concurrently (..))
-import              Control.Concurrent.MVar.Lifted (modifyMVar, newMVar)
 import              Control.Concurrent.STM
-import              Control.Exception (assert)
-import              Control.Exception.Safe (tryIO)
-import              Control.Monad (join, liftM, unless, void, when)
-import              Control.Monad.Catch
-import              Control.Monad.IO.Class
-import              Control.Monad.Logger
-import              Control.Monad.Reader (ask, asks, runReaderT)
-import              Control.Monad.Trans.Control
-import              Control.Monad.Trans.Unlift (MonadBaseUnlift, askRunBase)
-import "cryptohash" Crypto.Hash (SHA512 (..))
-import              Data.ByteString (ByteString)
+import              Stack.Prelude
+import              Crypto.Hash (SHA256 (..))
 import qualified    Data.ByteString as S
 import qualified    Data.ByteString.Lazy as L
-import              Data.Either (partitionEithers)
 import qualified    Data.Foldable as F
-import              Data.Function (fix)
-import qualified    Data.Git as Git
-import qualified    Data.Git.Ref as Git
-import qualified    Data.Git.Storage as Git
-import qualified    Data.Git.Storage.Object as Git
-import              Data.List (intercalate)
+import qualified    Data.HashMap.Strict as HashMap
+import qualified    Data.HashSet as HashSet
+import              Data.List (intercalate, maximum)
 import              Data.List.NonEmpty (NonEmpty)
 import qualified    Data.List.NonEmpty as NE
-import              Data.Map (Map)
 import qualified    Data.Map as Map
-import              Data.Maybe (maybeToList, catMaybes)
-import              Data.Monoid
-import              Data.Set (Set)
 import qualified    Data.Set as Set
-import              Data.String (fromString)
 import qualified    Data.Text as T
 import              Data.Text.Encoding (decodeUtf8)
 import              Data.Text.Metrics
-import              Data.Typeable (Typeable)
-import              Data.Word (Word64)
 import              Network.HTTP.Download
 import              Path
 import              Path.Extra (toFilePathNoTrailingSep)
 import              Path.IO
-import              Prelude -- Fix AMP warning
-import              Stack.GhcPkg
 import              Stack.PackageIndex
 import              Stack.Types.BuildPlan
 import              Stack.Types.Config
@@ -81,12 +60,9 @@ import              Stack.Types.PackageIdentifier
 import              Stack.Types.PackageIndex
 import              Stack.Types.PackageName
 import              Stack.Types.Version
-import              System.FilePath ((<.>))
 import qualified    System.FilePath as FP
-import              System.IO
+import              System.IO (hSeek, SeekMode (AbsoluteSeek))
 import              System.PosixCompat (setFileMode)
-
-type PackageCaches = Map PackageIdentifier (PackageIndex, PackageCache)
 
 data FetchException
     = Couldn'tReadIndexTarball FilePath Tar.FormatError
@@ -94,7 +70,7 @@ data FetchException
     | UnpackDirectoryAlreadyExists (Set FilePath)
     | CouldNotParsePackageSelectors [String]
     | UnknownPackageNames (Set PackageName)
-    | UnknownPackageIdentifiers (Set PackageIdentifier) String
+    | UnknownPackageIdentifiers (HashSet PackageIdentifierRevision) String
     deriving Typeable
 instance Exception FetchException
 
@@ -122,39 +98,34 @@ instance Show FetchException where
         intercalate ", " (map packageNameString $ Set.toList names)
     show (UnknownPackageIdentifiers idents suggestions) =
         "The following package identifiers were not found in your indices: " ++
-        intercalate ", " (map packageIdentifierString $ Set.toList idents) ++
+        intercalate ", " (map packageIdentifierRevisionString $ HashSet.toList idents) ++
         (if null suggestions then "" else "\n" ++ suggestions)
 
 -- | Fetch packages into the cache without unpacking
-fetchPackages :: (StackMiniM env m, HasConfig env)
-              => EnvOverride
-              -> Set PackageIdentifier
-              -> m ()
-fetchPackages menv idents' = do
-    resolved <- resolvePackages menv idents Set.empty
+fetchPackages :: HasConfig env => Set PackageIdentifier -> RIO env ()
+fetchPackages idents' = do
+    resolved <- resolvePackages Nothing idents Set.empty
     ToFetchResult toFetch alreadyUnpacked <- getToFetch Nothing resolved
     assert (Map.null alreadyUnpacked) (return ())
     nowUnpacked <- fetchPackages' Nothing toFetch
     assert (Map.null nowUnpacked) (return ())
   where
     -- Since we're just fetching tarballs and not unpacking cabal files, we can
-    -- always provide a Nothing Git SHA
-    idents = Map.fromList $ map (, Nothing) $ Set.toList idents'
+    -- always provide a CFILatest cabal file info
+    idents = map (flip PackageIdentifierRevision CFILatest) $ Set.toList idents'
 
 -- | Intended to work for the command line command.
-unpackPackages :: (StackMiniM env m, HasConfig env)
-               => EnvOverride
+unpackPackages :: HasConfig env
+               => Maybe SnapshotDef -- ^ when looking up by name, take from this build plan
                -> FilePath -- ^ destination
                -> [String] -- ^ names or identifiers
-               -> m ()
-unpackPackages menv dest input = do
+               -> RIO env ()
+unpackPackages mSnapshotDef dest input = do
     dest' <- resolveDir' dest
     (names, idents) <- case partitionEithers $ map parse input of
         ([], x) -> return $ partitionEithers x
         (errs, _) -> throwM $ CouldNotParsePackageSelectors errs
-    resolved <- resolvePackages menv
-        (Map.fromList $ map (, Nothing) idents)
-        (Set.fromList names)
+    resolved <- resolvePackages mSnapshotDef idents (Set.fromList names)
     ToFetchResult toFetch alreadyUnpacked <- getToFetch (Just dest') resolved
     unless (Map.null alreadyUnpacked) $
         throwM $ UnpackDirectoryAlreadyExists $ Set.fromList $ map toFilePath $ Map.elems alreadyUnpacked
@@ -168,86 +139,152 @@ unpackPackages menv dest input = do
   where
     -- Possible future enhancement: parse names as name + version range
     parse s =
-        case parsePackageNameFromString s of
+        case parsePackageName t of
             Right x -> Right $ Left x
             Left _ ->
-                case parsePackageIdentifierFromString s of
-                    Left _ -> Left s
+                case parsePackageIdentifierRevision t of
                     Right x -> Right $ Right x
+                    Left _ -> Left s
+      where
+        t = T.pack s
+
+-- | Same as 'unpackPackageIdents', but for a single package.
+unpackPackageIdent
+    :: HasConfig env
+    => Path Abs Dir -- ^ unpack directory
+    -> Path Rel Dir -- ^ the dist rename directory, see: https://github.com/fpco/stack/issues/157
+    -> PackageIdentifierRevision
+    -> RIO env (Path Abs Dir)
+unpackPackageIdent unpackDir distDir (PackageIdentifierRevision ident mcfi) = do
+  -- FIXME make this more direct in the future
+  m <- unpackPackageIdents unpackDir (Just distDir) [PackageIdentifierRevision ident mcfi]
+  case Map.toList m of
+    [(ident', dir)]
+      | ident /= ident' -> error "unpackPackageIdent: ident mismatch"
+      | otherwise       -> return dir
+    [] -> error "unpackPackageIdent: empty list"
+    _  -> error "unpackPackageIdent: multiple results"
 
 -- | Ensure that all of the given package idents are unpacked into the build
 -- unpack directory, and return the paths to all of the subdirectories.
 unpackPackageIdents
-    :: (StackMiniM env m, HasConfig env)
-    => EnvOverride
-    -> Path Abs Dir -- ^ unpack directory
+    :: HasConfig env
+    => Path Abs Dir -- ^ unpack directory
     -> Maybe (Path Rel Dir) -- ^ the dist rename directory, see: https://github.com/fpco/stack/issues/157
-    -> Map PackageIdentifier (Maybe GitSHA1)
-    -> m (Map PackageIdentifier (Path Abs Dir))
-unpackPackageIdents menv unpackDir mdistDir idents = do
-    resolved <- resolvePackages menv idents Set.empty
+    -> [PackageIdentifierRevision]
+    -> RIO env (Map PackageIdentifier (Path Abs Dir))
+unpackPackageIdents unpackDir mdistDir idents = do
+    resolved <- resolvePackages Nothing idents Set.empty
     ToFetchResult toFetch alreadyUnpacked <- getToFetch (Just unpackDir) resolved
     nowUnpacked <- fetchPackages' mdistDir toFetch
     return $ alreadyUnpacked <> nowUnpacked
 
 data ResolvedPackage = ResolvedPackage
-    { rpCache :: !PackageCache
+    { rpIdent :: !PackageIdentifier
+    , rpDownload :: !(Maybe PackageDownload)
+    , rpOffsetSize :: !OffsetSize
     , rpIndex :: !PackageIndex
-    , rpGitSHA1 :: !(Maybe GitSHA1)
     }
+    deriving Show
 
 -- | Resolve a set of package names and identifiers into @FetchPackage@ values.
-resolvePackages :: (StackMiniM env m, HasConfig env)
-                => EnvOverride
-                -> Map PackageIdentifier (Maybe GitSHA1)
+resolvePackages :: HasConfig env
+                => Maybe SnapshotDef -- ^ when looking up by name, take from this build plan
+                -> [PackageIdentifierRevision]
                 -> Set PackageName
-                -> m (Map PackageIdentifier ResolvedPackage)
-resolvePackages menv idents0 names0 = do
+                -> RIO env [ResolvedPackage]
+resolvePackages mSnapshotDef idents0 names0 = do
     eres <- go
     case eres of
         Left _ -> do
-            updateAllIndices menv
+            updateAllIndices
             go >>= either throwM return
         Right x -> return x
   where
-    go = r <$> resolvePackagesAllowMissing idents0 names0
+    go = r <$> resolvePackagesAllowMissing mSnapshotDef idents0 names0
     r (missingNames, missingIdents, idents)
       | not $ Set.null missingNames  = Left $ UnknownPackageNames       missingNames
-      | not $ Set.null missingIdents = Left $ UnknownPackageIdentifiers missingIdents ""
+      | not $ HashSet.null missingIdents = Left $ UnknownPackageIdentifiers missingIdents ""
       | otherwise                    = Right idents
 
+-- | Turn package identifiers and package names into a list of
+-- @ResolvedPackage@s. Returns any unresolved names and
+-- identifier. These are considered unresolved even if the only
+-- mismatch is in the cabal file info (MSS 2017-07-17: old versions of
+-- this code had special handling to treat missing cabal file info as
+-- a warning, that's no longer necessary or desirable since all info
+-- should be present and checked).
 resolvePackagesAllowMissing
-    :: (StackMiniM env m, HasConfig env)
-    => Map PackageIdentifier (Maybe GitSHA1)
+    :: forall env. HasConfig env
+    => Maybe SnapshotDef -- ^ when looking up by name, take from this build plan
+    -> [PackageIdentifierRevision]
     -> Set PackageName
-    -> m (Set PackageName, Set PackageIdentifier, Map PackageIdentifier ResolvedPackage)
-resolvePackagesAllowMissing idents0 names0 = do
-    caches <- getPackageCaches
-    let versions = Map.fromListWith max $ map toTuple $ Map.keys caches
-        (missingNames, idents1) = partitionEithers $ map
-            (\name -> maybe (Left name ) (Right . PackageIdentifier name)
-                (Map.lookup name versions))
-            (Set.toList names0)
-        (missingIdents, resolved) = partitionEithers $ map (goIdent caches)
-                                  $ Map.toList
-                                  $ idents0 <> Map.fromList (map (, Nothing) idents1)
-    return (Set.fromList missingNames, Set.fromList missingIdents, Map.fromList resolved)
-  where
-    goIdent caches (ident, mgitsha) =
-        case Map.lookup ident caches of
-            Nothing -> Left ident
-            Just (index, cache) -> Right (ident, ResolvedPackage
-                { rpCache = cache
-                , rpIndex = index
-                , rpGitSHA1 = mgitsha
-                })
+    -> RIO env (Set PackageName, HashSet PackageIdentifierRevision, [ResolvedPackage])
+resolvePackagesAllowMissing mSnapshotDef idents0 names0 = do
+  cache@(PackageCache cache') <- getPackageCaches
+
+      -- Find out the latest versions of all packages in the cache
+  let versions = fmap (maximum . HashMap.keys) cache'
+
+      -- Determines the identifier for a given name, either from
+      -- snapshot information or by taking the latest version
+      -- available
+      getNamed :: PackageName -> Maybe PackageIdentifierRevision
+      getNamed =
+          case mSnapshotDef of
+              Nothing -> getNamedFromIndex
+              Just sd -> getNamedFromSnapshotDef sd
+
+      -- Use whatever is specified in the snapshot. TODO this does not
+      -- handle the case where a snapshot defines a package outside of
+      -- the index, we'd need a LoadedSnapshot for that.
+      getNamedFromSnapshotDef sd name = do
+          loop $ sdLocations sd
+        where
+          loop [] = Nothing
+          loop (PLIndex ident@(PackageIdentifierRevision (PackageIdentifier name' _) _):rest)
+            | name == name' = Just ident
+            | otherwise = loop rest
+          loop (_:rest) = loop rest
+
+      -- Take latest version available, including latest cabal file information
+      getNamedFromIndex name = fmap
+          (\ver -> PackageIdentifierRevision (PackageIdentifier name ver) CFILatest)
+          (HashMap.lookup name versions)
+
+      (missingNames, idents1) = partitionEithers $ map
+          (\name -> maybe (Left name) Right (getNamed name))
+          (Set.toList names0)
+  let (missingIdents, resolved) =
+        partitionEithers
+          $ map (\pir -> maybe (Left pir) Right (lookupResolvedPackage pir cache))
+          $ idents0 <> idents1
+  return (Set.fromList missingNames, HashSet.fromList missingIdents, resolved)
+
+lookupResolvedPackage :: PackageIdentifierRevision -> PackageCache PackageIndex -> Maybe ResolvedPackage
+lookupResolvedPackage (PackageIdentifierRevision ident@(PackageIdentifier name version) cfi) (PackageCache cache) = do
+  (index, mdownload, files) <- HashMap.lookup name cache >>= HashMap.lookup version
+  offsetSize <-
+    case cfi of
+      CFILatest -> Just $ snd $ NE.last files
+      CFIHash _msize hash' -> -- TODO check size?
+          lookup hash'
+        $ concatMap (\(hashes, x) -> map (, x) hashes)
+        $ NE.toList files
+      CFIRevision rev -> fmap snd $ listToMaybe $ drop (fromIntegral rev) $ NE.toList files
+  Just ResolvedPackage
+    { rpIdent = ident
+    , rpDownload = mdownload
+    , rpOffsetSize = offsetSize
+    , rpIndex = index
+    }
 
 data ToFetch = ToFetch
     { tfTarball :: !(Path Abs File)
     , tfDestDir :: !(Maybe (Path Abs Dir))
     , tfUrl     :: !T.Text
     , tfSize    :: !(Maybe Word64)
-    , tfSHA512  :: !(Maybe ByteString)
+    , tfSHA256  :: !(Maybe StaticSHA256)
     , tfCabal   :: !ByteString
     -- ^ Contents of the .cabal file
     }
@@ -259,165 +296,154 @@ data ToFetchResult = ToFetchResult
 
 -- | Add the cabal files to a list of idents with their caches.
 withCabalFiles
-    :: (StackMiniM env m, HasConfig env)
+    :: (MonadReader env m, MonadUnliftIO m, HasConfig env, MonadThrow m)
     => IndexName
-    -> [(PackageIdentifier, PackageCache, Maybe GitSHA1, a)]
+    -> [(ResolvedPackage, a)]
     -> (PackageIdentifier -> a -> ByteString -> IO b)
     -> m [b]
 withCabalFiles name pkgs f = do
     indexPath <- configPackageIndex name
-    mgitRepo <- configPackageIndexRepo name
-    bracket
-        (liftIO $ openBinaryFile (toFilePath indexPath) ReadMode)
-        (liftIO . hClose) $ \h ->
-            let inner mgit = mapM (goPkg h mgit) pkgs
-             in case mgitRepo of
-                    Nothing -> inner Nothing
-                    Just repo -> bracket
-                        (liftIO $ Git.openRepo
-                                $ fromString
-                                $ toFilePath repo FP.</> ".git")
-                        (liftIO . Git.closeRepo)
-                        (inner . Just)
+    withBinaryFile (toFilePath indexPath) ReadMode
+      $ \h -> mapM (goPkg h) pkgs
   where
-    goPkg h (Just git) (ident, pc, Just (GitSHA1 sha), tf) = do
-        let ref = Git.fromHex sha
-        mobj <- liftIO $ tryIO $ Git.getObject git ref True
-        case mobj of
-            Right (Just (Git.ObjBlob (Git.Blob bs))) -> liftIO $ f ident tf (L.toStrict bs)
-            -- fallback when the appropriate SHA isn't found
-            e -> do
-                $logWarn $ mconcat
-                    [ "Did not find .cabal file for "
-                    , T.pack $ packageIdentifierString ident
-                    , " with Git SHA of "
-                    , decodeUtf8 sha
-                    ]
-                $logDebug (T.pack (show e))
-                goPkg h Nothing (ident, pc, Nothing, tf)
-    goPkg h _mgit (ident, pc, _mgitsha, tf) = liftIO $ do
-        hSeek h AbsoluteSeek $ fromIntegral $ pcOffset pc
-        cabalBS <- S.hGet h $ fromIntegral $ pcSize pc
-        f ident tf cabalBS
+    goPkg h (ResolvedPackage { rpIdent = ident, rpOffsetSize = OffsetSize offset size }, tf) = do
+        -- Did not find warning for tarballs is handled above
+        liftIO $ do
+            hSeek h AbsoluteSeek $ fromIntegral offset
+            cabalBS <- S.hGet h $ fromIntegral size
+            f ident tf cabalBS
 
 -- | Provide a function which will load up a cabal @ByteString@ from the
 -- package indices.
 withCabalLoader
-    :: (StackMiniM env m, HasConfig env, MonadBaseUnlift IO m)
-    => EnvOverride
-    -> ((PackageIdentifier -> IO ByteString) -> m a)
-    -> m a
-withCabalLoader menv inner = do
-    env <- ask
-
+    :: HasConfig env
+    => ((PackageIdentifierRevision -> IO ByteString) -> RIO env a)
+    -> RIO env a
+withCabalLoader inner = do
     -- Want to try updating the index once during a single run for missing
     -- package identifiers. We also want to ensure we only update once at a
     -- time
     --
     -- TODO: probably makes sense to move this concern into getPackageCaches
-    updateRef <- liftIO $ newMVar True
+    updateRef <- newMVar True
 
-    loadCaches <- getPackageCachesIO
-    runInBase <- liftBaseWith $ \run -> return (void . run)
-    unlift <- askRunBase
+    u <- askUnliftIO
 
     -- TODO in the future, keep all of the necessary @Handle@s open
-    let doLookup :: PackageIdentifier
+    let doLookup :: PackageIdentifierRevision
                  -> IO ByteString
         doLookup ident = do
-            caches <- loadCaches
-            eres <- unlift $ lookupPackageIdentifierExact ident env caches
+            bothCaches <- unliftIO u getPackageCaches
+            eres <- unliftIO u $ lookupPackageIdentifierExact ident bothCaches
             case eres of
                 Just bs -> return bs
                 -- Update the cache and try again
                 Nothing -> do
-                    let fuzzy = fuzzyLookupCandidates ident caches
+                    let fuzzy = fuzzyLookupCandidates ident bothCaches
                         suggestions = case fuzzy of
-                            Nothing ->
-                              case typoCorrectionCandidates ident caches of
-                                  Nothing -> ""
-                                  Just cs -> "Perhaps you meant " <>
-                                    orSeparated cs <> "?"
-                            Just cs -> "Possible candidates: " <>
+                            FRNameNotFound Nothing -> ""
+                            FRNameNotFound (Just cs) ->
+                                  "Perhaps you meant " <> orSeparated cs <> "?"
+                            FRVersionNotFound cs -> "Possible candidates: " <>
                               commaSeparated (NE.map packageIdentifierText cs)
+                              <> "."
+                            FRRevisionNotFound cs ->
+                              "The specified revision was not found.\nPossible candidates: " <>
+                              commaSeparated (NE.map (T.pack . packageIdentifierRevisionString) cs)
                               <> "."
                     join $ modifyMVar updateRef $ \toUpdate ->
                         if toUpdate then do
-                            runInBase $ do
+                            unliftIO u $ do
                                 $logInfo $ T.concat
                                     [ "Didn't see "
-                                    , T.pack $ packageIdentifierString ident
+                                    , T.pack $ packageIdentifierRevisionString ident
                                     , " in your package indices.\n"
                                     , "Updating and trying again."
                                     ]
-                                updateAllIndices menv
+                                updateAllIndices
                                 _ <- getPackageCaches
                                 return ()
                             return (False, doLookup ident)
                         else return (toUpdate,
-                                     throwM $ UnknownPackageIdentifiers
-                                       (Set.singleton ident) (T.unpack suggestions))
+                                     throwIO $ UnknownPackageIdentifiers
+                                       (HashSet.singleton ident) (T.unpack suggestions))
     inner doLookup
 
 lookupPackageIdentifierExact
-  :: (StackMiniM env m, HasConfig env)
-  => PackageIdentifier
-  -> env
-  -> PackageCaches
+  :: (MonadReader env m, MonadUnliftIO m, HasConfig env, MonadThrow m)
+  => PackageIdentifierRevision
+  -> PackageCache PackageIndex
   -> m (Maybe ByteString)
-lookupPackageIdentifierExact ident env caches =
-    case Map.lookup ident caches of
-        Nothing -> return Nothing
-        Just (index, cache) -> do
-            [bs] <- flip runReaderT env
-                  $ withCabalFiles (indexName index) [(ident, cache, Nothing, ())]
-                  $ \_ _ bs -> return bs
-            return $ Just bs
+lookupPackageIdentifierExact identRev cache = do
+  forM (lookupResolvedPackage identRev cache) $ \rp -> do
+    [bs] <- withCabalFiles (indexName (rpIndex rp)) [(rp, ())] $ \_ _ bs -> return bs
+    return bs
+
+data FuzzyResults
+  = FRNameNotFound !(Maybe (NonEmpty T.Text))
+  | FRVersionNotFound !(NonEmpty PackageIdentifier)
+  | FRRevisionNotFound !(NonEmpty PackageIdentifierRevision)
 
 -- | Given package identifier and package caches, return list of packages
 -- with the same name and the same two first version number components found
 -- in the caches.
 fuzzyLookupCandidates
-  :: PackageIdentifier
-  -> PackageCaches
-  -> Maybe (NonEmpty PackageIdentifier)
-fuzzyLookupCandidates (PackageIdentifier name ver) caches =
-  let (_, zero, bigger) = Map.splitLookup zeroIdent caches
-      zeroIdent         = PackageIdentifier name $(mkVersion "0.0")
-      sameName  (PackageIdentifier n _) = n == name
-      sameMajor (PackageIdentifier _ v) = toMajorVersion v == toMajorVersion ver
-  in NE.nonEmpty . filter sameMajor $ maybe [] (pure . const zeroIdent) zero
-         <> takeWhile sameName (Map.keys bigger)
+  :: PackageIdentifierRevision
+  -> PackageCache index
+  -> FuzzyResults
+fuzzyLookupCandidates (PackageIdentifierRevision (PackageIdentifier name ver) _rev) (PackageCache caches) =
+  case HashMap.lookup name caches of
+    Nothing -> FRNameNotFound $ typoCorrectionCandidates name (PackageCache caches)
+    Just m ->
+      case HashMap.lookup ver m of
+        Nothing ->
+          case NE.nonEmpty $ filter sameMajor $ HashMap.keys m of
+            Just vers -> FRVersionNotFound $ NE.map (PackageIdentifier name) vers
+            Nothing ->
+              case NE.nonEmpty $ HashMap.keys m of
+                Nothing -> error "fuzzyLookupCandidates: no versions"
+                Just vers -> FRVersionNotFound $ NE.map (PackageIdentifier name) vers
+        Just (_index, _mpd, revisions) ->
+          let hashes = concatMap fst $ NE.toList revisions
+              pirs = map (PackageIdentifierRevision (PackageIdentifier name ver) . CFIHash Nothing) hashes
+           in case NE.nonEmpty pirs of
+                Nothing -> error "fuzzyLookupCandidates: no revisions"
+                Just pirs' -> FRRevisionNotFound pirs'
+  where
+    sameMajor v = toMajorVersion v == toMajorVersion ver
 
 -- | Try to come up with typo corrections for given package identifier using
 -- package caches. This should be called before giving up, i.e. when
 -- 'fuzzyLookupCandidates' cannot return anything.
 typoCorrectionCandidates
-  :: PackageIdentifier
-  -> PackageCaches
+  :: PackageName
+  -> PackageCache index
   -> Maybe (NonEmpty T.Text)
-typoCorrectionCandidates ident =
-  let getName = packageNameText . packageIdentifierName
-      name    = getName ident
+typoCorrectionCandidates name' (PackageCache cache) =
+  let name = packageNameText name'
   in  NE.nonEmpty
-    . Map.keys
-    . Map.filterWithKey (const . (== 1) . damerauLevenshtein name)
-    . Map.mapKeys getName
+    . take 10
+    . map snd
+    . filter (\(distance, _) -> distance < 4)
+    . map (\k -> (damerauLevenshtein name (packageNameText k), packageNameText k))
+    . HashMap.keys
+    $ cache
 
 -- | Figure out where to fetch from.
-getToFetch :: (StackMiniM env m, HasConfig env)
+getToFetch :: HasConfig env
            => Maybe (Path Abs Dir) -- ^ directory to unpack into, @Nothing@ means no unpack
-           -> Map PackageIdentifier ResolvedPackage
-           -> m ToFetchResult
+           -> [ResolvedPackage]
+           -> RIO env ToFetchResult
 getToFetch mdest resolvedAll = do
-    (toFetch0, unpacked) <- liftM partitionEithers $ mapM checkUnpacked $ Map.toList resolvedAll
+    (toFetch0, unpacked) <- liftM partitionEithers $ mapM checkUnpacked resolvedAll
     toFetch1 <- mapM goIndex $ Map.toList $ Map.fromListWith (++) toFetch0
     return ToFetchResult
         { tfrToFetch = Map.unions toFetch1
         , tfrAlreadyUnpacked = Map.fromList unpacked
         }
   where
-    checkUnpacked (ident, resolved) = do
+    checkUnpacked resolved = do
+        let ident = rpIdent resolved
         dirRel <- parseRelDir $ packageIdentifierString ident
         let mdestDir = (</> dirRel) <$> mdest
         mexists <-
@@ -430,17 +456,17 @@ getToFetch mdest resolvedAll = do
             Just destDir -> return $ Right (ident, destDir)
             Nothing -> do
                 let index = rpIndex resolved
-                    d = pcDownload $ rpCache resolved
+                    d = rpDownload resolved
                     targz = T.pack $ packageIdentifierString ident ++ ".tar.gz"
                 tarball <- configPackageTarball (indexName index) ident
-                return $ Left (indexName index, [(ident, rpCache resolved, rpGitSHA1 resolved, ToFetch
+                return $ Left (indexName index, [(resolved, ToFetch
                     { tfTarball = tarball
                     , tfDestDir = mdestDir
-                    , tfUrl = case d of
-                        Just d' -> decodeUtf8 $ pdUrl d'
-                        Nothing -> indexDownloadPrefix index <> targz
+                    , tfUrl = case fmap pdUrl d of
+                        Just url | not (S.null url) -> decodeUtf8 url
+                        _ -> indexDownloadPrefix index <> targz
                     , tfSize = fmap pdSize d
-                    , tfSHA512 = fmap pdSHA512 d
+                    , tfSHA256 = fmap pdSHA256 d
                     , tfCabal = S.empty -- filled in by goIndex
                     })])
 
@@ -463,18 +489,18 @@ getToFetch mdest resolvedAll = do
 -- @
 --
 -- Since 0.1.0.0
-fetchPackages' :: (StackMiniM env m, HasConfig env)
+fetchPackages' :: HasConfig env
                => Maybe (Path Rel Dir) -- ^ the dist rename directory, see: https://github.com/fpco/stack/issues/157
                -> Map PackageIdentifier ToFetch
-               -> m (Map PackageIdentifier (Path Abs Dir))
+               -> RIO env (Map PackageIdentifier (Path Abs Dir))
 fetchPackages' mdistDir toFetchAll = do
-    connCount <- asks $ configConnectionCount . getConfig
+    connCount <- view $ configL.to configConnectionCount
     outputVar <- liftIO $ newTVarIO Map.empty
 
-    runInBase <- liftBaseWith $ \run -> return (void . run)
+    run <- askRunInIO
     parMapM_
         connCount
-        (go outputVar runInBase)
+        (go outputVar run)
         (Map.toList toFetchAll)
 
     liftIO $ readTVarIO outputVar
@@ -484,19 +510,19 @@ fetchPackages' mdistDir toFetchAll = do
        -> (m () -> IO ())
        -> (PackageIdentifier, ToFetch)
        -> m ()
-    go outputVar runInBase (ident, toFetch) = do
+    go outputVar run (ident, toFetch) = do
         req <- parseUrlThrow $ T.unpack $ tfUrl toFetch
         let destpath = tfTarball toFetch
 
-        let toHashCheck bs = HashCheck SHA512 (CheckHexDigestByteString bs)
+        let toHashCheck bs = HashCheck SHA256 (CheckHexDigestByteString bs)
         let downloadReq = DownloadRequest
                 { drRequest = req
-                , drHashChecks = map toHashCheck $ maybeToList (tfSHA512 toFetch)
+                , drHashChecks = map (toHashCheck . staticSHA256ToBase16) $ maybeToList (tfSHA256 toFetch)
                 , drLengthCheck = fromIntegral <$> tfSize toFetch
                 , drRetryPolicy = drRetryPolicyDefault
                 }
         let progressSink _ =
-                liftIO $ runInBase $ $logInfo $ packageIdentifierText ident <> ": download"
+                liftIO $ run $ $logInfo $ packageIdentifierText ident <> ": download"
         _ <- verifiedDownload downloadReq destpath progressSink
 
         identStrP <- parseRelDir $ packageIdentifierString ident
@@ -527,7 +553,7 @@ fetchPackages' mdistDir toFetchAll = do
                 let cabalFP =
                         innerDest FP.</>
                         packageNameString (packageIdentifierName ident)
-                        <.> "cabal"
+                        FP.<.> "cabal"
                 S.writeFile cabalFP $ tfCabal toFetch
 
                 atomically $ modifyTVar outputVar $ Map.insert ident destDir
@@ -597,30 +623,24 @@ untar tarPath expectedTarFolder destDirParent = do
                     perm) filePerms
                 return unexpectedEntries
 
-parMapM_ :: (F.Foldable f,MonadIO m,MonadBaseControl IO m)
+parMapM_ :: (F.Foldable f,MonadUnliftIO m)
          => Int
          -> (a -> m ())
          -> f a
          -> m ()
 parMapM_ (max 1 -> 1) f xs = F.mapM_ f xs
-parMapM_ cnt f xs0 = do
-    var <- liftIO (newTVarIO $ F.toList xs0)
+parMapM_ cnt f xs0 = withRunInIO $ \run -> do
+    var <- newTVarIO $ F.toList xs0
 
-    -- See comment on similar line in Stack.Build
-    runInBase <- liftBaseWith $ \run -> return (void . run)
-
-    let worker = fix $ \loop -> join $ atomically $ do
-            xs <- readTVar var
-            case xs of
-                [] -> return $ return ()
-                x:xs' -> do
-                    writeTVar var xs'
-                    return $ do
-                        runInBase $ f x
-                        loop
-        workers 1 = Concurrently worker
-        workers i = Concurrently worker *> workers (i - 1)
-    liftIO $ runConcurrently $ workers cnt
+    replicateConcurrently_ cnt $ fix $ \loop -> join $ atomically $ do
+      xs <- readTVar var
+      case xs of
+          [] -> return $ return ()
+          x:xs' -> do
+              writeTVar var xs'
+              return $ do
+                  run $ f x
+                  loop
 
 orSeparated :: NonEmpty T.Text -> T.Text
 orSeparated xs

@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DeriveDataTypeable #-}
@@ -18,44 +19,33 @@ module Stack.New
     , listTemplates)
     where
 
-import           Control.Monad
-import           Control.Monad.Catch
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Reader
+import           Stack.Prelude
 import           Control.Monad.Trans.Writer.Strict
 import           Data.Aeson
 import           Data.Aeson.Types
+import qualified Data.ByteString as SB
 import qualified Data.ByteString.Lazy as LB
 import           Data.Conduit
-import           Data.Foldable (asum)
 import qualified Data.HashMap.Strict as HM
 import           Data.List
-import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import           Data.Maybe (fromMaybe)
-import           Data.Maybe.Extra (mapMaybeM)
-import           Data.Monoid
-import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding.Error as T (lenientDecode)
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as LT
 import           Data.Time.Calendar
 import           Data.Time.Clock
-import           Data.Typeable
 import qualified Data.Yaml as Yaml
 import           Network.HTTP.Download
 import           Network.HTTP.Simple
 import           Path
 import           Path.IO
-import           Prelude
 import           Stack.Constants
+import           Stack.Constants.Config
 import           Stack.Types.Config
 import           Stack.Types.PackageName
-import           Stack.Types.StackT
 import           Stack.Types.TemplateName
 import           System.Process.Run
 import           Text.Hastache
@@ -79,16 +69,16 @@ data NewOpts = NewOpts
     }
 
 -- | Create a new project with the given options.
-new
-    :: (StackM env m, HasConfig env)
-    => NewOpts -> Bool -> m (Path Abs Dir)
+new :: HasConfig env => NewOpts -> Bool -> RIO env (Path Abs Dir)
 new opts forceOverwrite = do
+    when (newOptsProjectName opts `elem` wiredInPackages) $
+      throwM $ Can'tUseWiredInName (newOptsProjectName opts)
     pwd <- getCurrentDir
     absDir <- if bare then return pwd
                       else do relDir <- parseRelDir (packageNameString project)
                               liftM (pwd </>) (return relDir)
     exists <- doesDirExist absDir
-    configTemplate <- asks (configDefaultTemplate . getConfig)
+    configTemplate <- view $ configL.to configDefaultTemplate
     let template = fromMaybe defaultTemplateName $ asum [ cliOptionTemplate
                                                         , configTemplate
                                                         ]
@@ -129,10 +119,12 @@ data TemplateFrom = LocalTemp | RemoteTemp
 
 -- | Download and read in a template's text content.
 loadTemplate
-    :: forall env m. (StackM env m, HasConfig env)
-    => TemplateName -> (TemplateFrom -> m ()) -> m Text
+    :: forall env. HasConfig env
+    => TemplateName
+    -> (TemplateFrom -> RIO env ())
+    -> RIO env Text
 loadTemplate name logIt = do
-    templateDir <- asks (templatesDir . getConfig)
+    templateDir <- view $ configL.to templatesDir
     case templatePath name of
         AbsPath absFile -> logIt LocalTemp >> loadLocalFile absFile
         UrlPath s -> do
@@ -151,17 +143,17 @@ loadTemplate name logIt = do
                         Nothing -> throwM e
                 )
   where
-    loadLocalFile :: Path b File -> m Text
+    loadLocalFile :: Path b File -> RIO env Text
     loadLocalFile path = do
         $logDebug ("Opening local template: \"" <> T.pack (toFilePath path)
                                                 <> "\"")
         exists <- doesFileExist path
         if exists
-            then liftIO (T.readFile (toFilePath path))
+            then liftIO (fmap (T.decodeUtf8With T.lenientDecode) (SB.readFile (toFilePath path)))
             else throwM (FailedToLoadTemplate name (toFilePath path))
     relRequest :: MonadThrow n => Path Rel File -> n Request
     relRequest rel = parseRequest (defaultTemplateUrl <> "/" <> toFilePath rel)
-    downloadTemplate :: Request -> Path Abs File -> m Text
+    downloadTemplate :: Request -> Path Abs File -> RIO env Text
     downloadTemplate req path = do
         logIt RemoteTemp
         _ <-
@@ -173,15 +165,15 @@ loadTemplate name logIt = do
 
 -- | Apply and unpack a template into a directory.
 applyTemplate
-    :: (StackM env m, HasConfig env)
+    :: HasConfig env
     => PackageName
     -> TemplateName
     -> Map Text Text
     -> Path Abs Dir
     -> Text
-    -> m (Map (Path Abs File) LB.ByteString)
+    -> RIO env  (Map (Path Abs File) LB.ByteString)
 applyTemplate project template nonceParams dir templateText = do
-    config <- asks getConfig
+    config <- view configL
     currentYear <- do
       now <- liftIO getCurrentTime
       (year, _, _) <- return $ toGregorian . utctDay $ now
@@ -259,11 +251,11 @@ writeTemplateFiles files =
 
 -- | Run any initialization functions, such as Git.
 runTemplateInits
-    :: (StackM env m, HasConfig env)
-    => Path Abs Dir -> m ()
+    :: HasConfig env
+    => Path Abs Dir -> RIO env ()
 runTemplateInits dir = do
     menv <- getMinimalEnvOverride
-    config <- asks getConfig
+    config <- view configL
     case configScmInit config of
         Nothing -> return ()
         Just Git ->
@@ -272,7 +264,7 @@ runTemplateInits dir = do
                          $logInfo "git init failed to run, ignoring ...")
 
 -- | Display the set of templates accompanied with description if available.
-listTemplates :: StackM env m => m ()
+listTemplates :: HasLogFunc env => RIO env ()
 listTemplates = do
     templates <- getTemplates
     templateInfo <- getTemplateInfo
@@ -289,21 +281,21 @@ listTemplates = do
       else mapM_ (liftIO . T.putStrLn . templateName) (S.toList templates)
 
 -- | Get the set of templates.
-getTemplates :: StackM env m => m (Set TemplateName)
+getTemplates :: HasLogFunc env => RIO env (Set TemplateName)
 getTemplates = do
-    req <- liftM addHeaders (parseUrlThrow defaultTemplatesList)
+    req <- liftM setGithubHeaders (parseUrlThrow defaultTemplatesList)
     resp <- catch (httpJSON req) (throwM . FailedToDownloadTemplates)
     case getResponseStatusCode resp of
         200 -> return $ unTemplateSet $ getResponseBody resp
         code -> throwM (BadTemplatesResponse code)
 
-getTemplateInfo :: StackM env m => m (Map Text TemplateInfo)
+getTemplateInfo :: HasLogFunc env => RIO env (Map Text TemplateInfo)
 getTemplateInfo = do
-  req <- liftM addHeaders (parseUrlThrow defaultTemplateInfoUrl)
+  req <- liftM setGithubHeaders (parseUrlThrow defaultTemplateInfoUrl)
   resp <- catch (liftM Right $ httpLbs req) (\(ex :: HttpException) -> return . Left $ "Failed to download template info. The HTTP error was: " <> show ex)
   case resp >>= is200 of
     Left err -> do
-      liftIO . putStrLn $ err
+      $logInfo $ T.pack err
       return M.empty
     Right resp' ->
       case Yaml.decodeEither (LB.toStrict $ getResponseBody resp') :: Either String Object of
@@ -316,10 +308,6 @@ getTemplateInfo = do
       case getResponseStatusCode resp of
         200 -> return resp
         code -> Left $ "Unexpected status code while retrieving templates info: " <> show code
-
-addHeaders :: Request -> Request
-addHeaders = setRequestHeader "User-Agent" ["The Haskell Stack"]
-           . setRequestHeader "Accept" ["application/vnd.github.v3+json"]
 
 newtype TemplateSet = TemplateSet { unTemplateSet :: Set TemplateName }
 instance FromJSON TemplateSet where
@@ -381,6 +369,7 @@ data NewException
     | FailedToDownloadTemplateInfo !HttpException
     | BadTemplateInfo !String
     | BadTemplateInfoResponse !Int
+    | Can'tUseWiredInName !PackageName
     deriving (Typeable)
 
 instance Exception NewException
@@ -443,3 +432,5 @@ instance Show NewException where
         "Template info couldn't be parsed: " <> err
     show (BadTemplateInfoResponse code) =
         "Unexpected status code while retrieving templates info: " <> show code
+    show (Can'tUseWiredInName name) =
+        "The name \"" <> packageNameString name <> "\" is used by GHC wired-in packages, and so shouldn't be used as a package name"

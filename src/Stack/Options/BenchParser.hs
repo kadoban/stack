@@ -1,10 +1,11 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Stack.Options.BenchParser where
 
-import           Data.Monoid.Extra
 import           Options.Applicative
 import           Options.Applicative.Builder.Extra
+import           Stack.Prelude
 import           Stack.Options.Utils
 import           Stack.Types.Config
 
@@ -13,6 +14,7 @@ import           Stack.Types.Config
 benchOptsParser :: Bool -> Parser BenchmarkOptsMonoid
 benchOptsParser hide0 = BenchmarkOptsMonoid
         <$> optionalFirst (strOption (long "benchmark-arguments" <>
+                                      long "ba" <>
                                  metavar "BENCH_ARGS" <>
                                  help ("Forward BENCH_ARGS to the benchmark suite. " <>
                                        "Supports templates from `cabal bench`") <>

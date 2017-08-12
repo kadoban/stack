@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -7,23 +8,20 @@ module Stack.Path
     , pathParser
     ) where
 
-import           Control.Monad.Catch
-import           Control.Monad.Logger
-import           Control.Monad.Reader
-import           Control.Monad.Trans.Control
+import           Stack.Prelude
 import           Data.List (intercalate)
-import           Data.Maybe.Extra
-import           Data.Monoid
 import qualified Data.Set as Set
-import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import           Lens.Micro (lens)
 import qualified Options.Applicative as OA
 import           Path
 import           Path.Extra
 import           Stack.Constants
+import           Stack.Constants.Config
 import           Stack.GhcPkg as GhcPkg
 import           Stack.Types.Config
+import           Stack.Types.Runner
 import qualified System.FilePath as FP
 import           System.IO (stderr)
 import           System.Process.Read (EnvOverride(eoPath))
@@ -31,14 +29,14 @@ import           System.Process.Read (EnvOverride(eoPath))
 -- | Print out useful path information in a human-readable format (and
 -- support others later).
 path
-    :: (MonadIO m, MonadBaseControl IO m, MonadReader env m, HasEnvConfig env,
-        MonadCatch m, MonadLogger m)
+    :: (MonadUnliftIO m, MonadReader env m, HasEnvConfig env, MonadThrow m,
+        MonadLogger m)
     => [Text]
     -> m ()
 path keys =
     do -- We must use a BuildConfig from an EnvConfig to ensure that it contains the
        -- full environment info including GHC paths etc.
-       bc <- asks (getBuildConfig . getEnvConfig)
+       bc <- view $ envConfigL.buildConfigL
        -- This is the modified 'bin-path',
        -- including the local GHC or MSYS if not configured to operate on
        -- global GHC.
@@ -48,13 +46,14 @@ path keys =
        snap <- packageDatabaseDeps
        plocal <- packageDatabaseLocal
        extra <- packageDatabaseExtra
-       global <- GhcPkg.getGlobalDB menv =<< getWhichCompiler
+       whichCompiler <- view $ actualCompilerVersionL.whichCompilerL
+       global <- GhcPkg.getGlobalDB menv whichCompiler
        snaproot <- installationRootDeps
        localroot <- installationRootLocal
        toolsDir <- bindirCompilerTools
        distDir <- distRelativeDir
        hpcDir <- hpcReportDir
-       compiler <- getCompilerPath =<< getWhichCompiler
+       compiler <- getCompilerPath whichCompiler
        let deprecated = filter ((`elem` keys) . fst) deprecatedPathKeys
        liftIO $ forM_ deprecated $ \(oldOption, newOption) -> T.hPutStrLn stderr $ T.unlines
            [ ""
@@ -117,6 +116,16 @@ data PathInfo = PathInfo
     , piCompiler     :: Path Abs File
     }
 
+instance HasPlatform PathInfo
+instance HasLogFunc PathInfo where
+    logFuncL = configL.logFuncL
+instance HasRunner PathInfo where
+    runnerL = configL.runnerL
+instance HasConfig PathInfo
+instance HasBuildConfig PathInfo where
+    buildConfigL = lens piBuildConfig (\x y -> x { piBuildConfig = y })
+                 . buildConfigL
+
 -- | The paths of interest to a user. The first tuple string is used
 -- for a description that the optparse flag uses, and the second
 -- string as a machine-readable key and also for @--foo@ flags. The user
@@ -130,19 +139,19 @@ paths :: [(String, Text, PathInfo -> Text)]
 paths =
     [ ( "Global stack root directory"
       , T.pack stackRootOptionName
-      , T.pack . toFilePathNoTrailingSep . configStackRoot . bcConfig . piBuildConfig )
+      , view $ stackRootL.to toFilePathNoTrailingSep.to T.pack)
     , ( "Project root (derived from stack.yaml file)"
       , "project-root"
-      , T.pack . toFilePathNoTrailingSep . bcRoot . piBuildConfig )
+      , view $ projectRootL.to toFilePathNoTrailingSep.to T.pack)
     , ( "Configuration location (where the stack.yaml file is)"
       , "config-location"
-      , T.pack . toFilePath . bcStackYaml . piBuildConfig )
+      , view $ stackYamlL.to toFilePath.to T.pack)
     , ( "PATH environment variable"
       , "bin-path"
       , T.pack . intercalate [FP.searchPathSeparator] . eoPath . piEnvOverride )
     , ( "Install location for GHC and other core tools"
       , "programs"
-      , T.pack . toFilePathNoTrailingSep . configLocalPrograms . bcConfig . piBuildConfig )
+      , view $ configL.to configLocalPrograms.to toFilePathNoTrailingSep.to T.pack)
     , ( "Compiler binary (e.g. ghc)"
       , "compiler-exe"
       , T.pack . toFilePath . piCompiler )
@@ -154,13 +163,13 @@ paths =
       , T.pack . toFilePathNoTrailingSep . piToolsDir )
     , ( "Local bin dir where stack installs executables (e.g. ~/.local/bin)"
       , "local-bin"
-      , T.pack . toFilePathNoTrailingSep . configLocalBin . bcConfig . piBuildConfig )
+      , view $ configL.to configLocalBin.to toFilePathNoTrailingSep.to T.pack)
     , ( "Extra include directories"
       , "extra-include-dirs"
-      , T.intercalate ", " . map (T.pack . toFilePathNoTrailingSep) . Set.elems . configExtraIncludeDirs . bcConfig . piBuildConfig )
+      , T.intercalate ", " . map T.pack . Set.elems . configExtraIncludeDirs . view configL )
     , ( "Extra library directories"
       , "extra-library-dirs"
-      , T.intercalate ", " . map (T.pack . toFilePathNoTrailingSep) . Set.elems . configExtraLibDirs . bcConfig . piBuildConfig )
+      , T.intercalate ", " . map T.pack . Set.elems . configExtraLibDirs . view configL )
     , ( "Snapshot package database"
       , "snapshot-pkg-db"
       , T.pack . toFilePathNoTrailingSep . piSnapDb )
@@ -193,13 +202,13 @@ paths =
       , T.pack . toFilePathNoTrailingSep . piHpcDir )
     , ( "DEPRECATED: Use '--local-bin' instead"
       , "local-bin-path"
-      , T.pack . toFilePathNoTrailingSep . configLocalBin . bcConfig . piBuildConfig )
+      , T.pack . toFilePathNoTrailingSep . configLocalBin . view configL )
     , ( "DEPRECATED: Use '--programs' instead"
       , "ghc-paths"
-      , T.pack . toFilePathNoTrailingSep . configLocalPrograms . bcConfig . piBuildConfig )
+      , T.pack . toFilePathNoTrailingSep . configLocalPrograms . view configL )
     , ( "DEPRECATED: Use '--" <> stackRootOptionName <> "' instead"
       , T.pack deprecatedStackRootOptionName
-      , T.pack . toFilePathNoTrailingSep . configStackRoot . bcConfig . piBuildConfig )
+      , T.pack . toFilePathNoTrailingSep . view stackRootL )
     ]
 
 deprecatedPathKeys :: [(Text, Text)]

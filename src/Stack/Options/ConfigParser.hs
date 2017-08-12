@@ -1,10 +1,11 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stack.Options.ConfigParser where
 
 import           Data.Char
-import           Data.Monoid.Extra
 import qualified Data.Set                          as Set
 import           Options.Applicative
 import           Options.Applicative.Builder.Extra
+import           Path
 import           Stack.Constants
 import           Stack.Options.BuildMonoidParser
 import           Stack.Options.DockerParser
@@ -12,11 +13,13 @@ import           Stack.Options.GhcBuildParser
 import           Stack.Options.GhcVariantParser
 import           Stack.Options.NixParser
 import           Stack.Options.Utils
+import           Stack.Prelude
 import           Stack.Types.Config
+import qualified System.FilePath as FilePath
 
 -- | Command-line arguments parser for configuration.
-configOptsParser :: GlobalOptsContext -> Parser ConfigMonoid
-configOptsParser hide0 =
+configOptsParser :: FilePath -> GlobalOptsContext -> Parser ConfigMonoid
+configOptsParser currentDir hide0 =
     (\stackRoot workDir buildOpts dockerOpts nixOpts systemGHC installGHC arch ghcVariant ghcBuild jobs includes libs overrideGccPath skipGHCCheck skipMsys localBin modifyCodePage allowDifferentUser dumpLogs -> mempty
         { configMonoidStackRoot = stackRoot
         , configMonoidWorkDir = workDir
@@ -46,10 +49,12 @@ configOptsParser hide0 =
                      "(Overrides any STACK_ROOT environment variable)")
             <> hide
             ))
-    <*> optionalFirst (relDirOption
+    <*> optionalFirst (option (eitherReader (mapLeft showWorkDirError . parseRelDir))
             ( long "work-dir"
             <> metavar "WORK-DIR"
-            <> help "Override work directory (default: .stack-work)"
+            <> completer (pathCompleterWith (defaultPathCompleterOpts { pcoAbsolute = False, pcoFileFilter = const False }))
+            <> help ("Relative path of work directory " ++
+                     "(Overrides any STACK_WORK environment variable, default is '.stack-work')")
             <> hide
             ))
     <*> buildOptsMonoidParser hide0
@@ -78,15 +83,17 @@ configOptsParser hide0 =
            <> help "Number of concurrent jobs to run"
            <> hide
             ))
-    <*> fmap Set.fromList (many (absDirOption
+    <*> fmap Set.fromList (many ((currentDir FilePath.</>) <$> strOption
             ( long "extra-include-dirs"
            <> metavar "DIR"
+           <> completer dirCompleter
            <> help "Extra directories to check for C header files"
            <> hide
             )))
-    <*> fmap Set.fromList (many (absDirOption
+    <*> fmap Set.fromList (many ((currentDir FilePath.</>) <$> strOption
             ( long "extra-lib-dirs"
            <> metavar "DIR"
+           <> completer dirCompleter
            <> help "Extra directories to check for libraries"
            <> hide
             )))
@@ -107,6 +114,7 @@ configOptsParser hide0 =
     <*> optionalFirst (strOption
              ( long "local-bin-path"
             <> metavar "DIR"
+            <> completer dirCompleter
             <> help "Install binaries to DIR"
             <> hide
              ))
@@ -129,3 +137,6 @@ configOptsParser hide0 =
     toDumpLogs (First (Just True)) = First (Just DumpAllLogs)
     toDumpLogs (First (Just False)) = First (Just DumpNoLogs)
     toDumpLogs (First Nothing) = First Nothing
+    showWorkDirError err = show err ++
+        "\nNote that --work-dir must be a relative child directory, because work-dirs outside of the package are not supported by Cabal." ++
+        "\nSee https://github.com/commercialhaskell/stack/issues/2954"

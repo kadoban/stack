@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
@@ -24,34 +25,21 @@ module Stack.PackageDump
     , pruneDeps
     ) where
 
-import           Control.Applicative
-import           Control.Arrow ((&&&))
-import           Control.Exception.Safe (tryIO)
-import           Control.Monad (liftM)
-import           Control.Monad.Catch
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger (MonadLogger)
-import           Control.Monad.Trans.Control
+import           Stack.Prelude
 import           Data.Attoparsec.Args
 import           Data.Attoparsec.Text as P
 import           Data.Conduit
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Text as CT
-import           Data.Either (partitionEithers)
-import           Data.IORef
-import           Data.Map (Map)
+import           Data.List (isPrefixOf)
 import qualified Data.Map as Map
-import           Data.Maybe (catMaybes, listToMaybe)
-import           Data.Maybe.Extra (mapMaybeM)
 import qualified Data.Set as Set
 import           Data.Store.VersionTagged
-import           Data.Text (Text)
 import qualified Data.Text as T
-import           Data.Typeable (Typeable)
+import qualified Distribution.License as C
 import qualified Distribution.System as OS
-import           Path
+import qualified Distribution.Text as C
 import           Path.Extra (toFilePathNoTrailingSep)
-import           Prelude -- Fix AMP warning
 import           Stack.GhcPkg
 import           Stack.Types.Compiler
 import           Stack.Types.GhcPkgId
@@ -64,7 +52,7 @@ import           System.Process.Read
 
 -- | Call ghc-pkg dump with appropriate flags and stream to the given @Sink@, for a single database
 ghcPkgDump
-    :: (MonadIO m, MonadLogger m, MonadBaseControl IO m, MonadCatch m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => EnvOverride
     -> WhichCompiler
     -> [Path Abs Dir] -- ^ if empty, use global
@@ -74,7 +62,7 @@ ghcPkgDump = ghcPkgCmdArgs ["dump"]
 
 -- | Call ghc-pkg describe with appropriate flags and stream to the given @Sink@, for a single database
 ghcPkgDescribe
-    :: (MonadIO m, MonadLogger m, MonadBaseControl IO m, MonadCatch m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => PackageName
     -> EnvOverride
     -> WhichCompiler
@@ -85,7 +73,7 @@ ghcPkgDescribe pkgName = ghcPkgCmdArgs ["describe", "--simple-output", packageNa
 
 -- | Call ghc-pkg and stream to the given @Sink@, for a single database
 ghcPkgCmdArgs
-    :: (MonadIO m, MonadLogger m, MonadBaseControl IO m, MonadCatch m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => [String]
     -> EnvOverride
     -> WhichCompiler
@@ -114,7 +102,7 @@ newInstalledCache = liftIO $ InstalledCache <$> newIORef (InstalledCacheInner Ma
 
 -- | Load a @InstalledCache@ from disk, swallowing any errors and returning an
 -- empty cache.
-loadInstalledCache :: (MonadLogger m, MonadIO m, MonadBaseControl IO m)
+loadInstalledCache :: (MonadLogger m, MonadUnliftIO m)
                    => Path Abs File -> m InstalledCache
 loadInstalledCache path = do
     m <- $(versionedDecodeOrLoad installedCacheVC) path (return $ InstalledCacheInner Map.empty)
@@ -254,45 +242,50 @@ addHaddock (InstalledCache ref) =
 -- | Add debugging symbol information to the stream of @DumpPackage@s
 addSymbols :: MonadIO m
            => InstalledCache
-           -> CompilerVersion
            -> Conduit (DumpPackage a b c) m (DumpPackage a b Bool)
-addSymbols (InstalledCache ref) ver =
+addSymbols (InstalledCache ref) =
     CL.mapM go
   where
-    ver' = versionString . getGhcVersion $ ver
     go dp = do
         InstalledCacheInner m <- liftIO $ readIORef ref
         let gid = dpGhcPkgId dp
         s <- case Map.lookup gid m of
             Just installed -> return (installedCacheSymbols installed)
             Nothing | null (dpLibraries dp) -> return True
-            Nothing -> do
-                let lib = T.unpack . head $ dpLibraries dp
-                liftM or . mapM (\dir -> liftIO $ hasDebuggingSymbols ver' dir lib) $ dpLibDirs dp
+            Nothing ->
+              case dpLibraries dp of
+                [] -> return True
+                lib:_ ->
+                  liftM or . mapM (\dir -> liftIO $ hasDebuggingSymbols dir (T.unpack lib)) $ dpLibDirs dp
         return dp { dpSymbols = s }
 
-hasDebuggingSymbols :: String   -- ^ target compiler
-                    -> FilePath -- ^ library directory
+hasDebuggingSymbols :: FilePath -- ^ library directory
                     -> String   -- ^ name of library
                     -> IO Bool
-hasDebuggingSymbols ver dir lib = case OS.buildOS of
-    OS.OSX     -> liftM (and . fmap ((/= '0') . head) . Prelude.take 30 . lines) $
-        readProcess "dwarfdump" [concat [dir, "/lib", lib, "-ghc", ver, ".a"]] ""
-    OS.Linux   -> liftM ((== "Contents") . head . words . (!! 2) . lines) $
-        readProcess "readelf" ["--debug-dump=info", "--dwarf-depth=1", concat [dir, "/lib", lib, "-ghc", ver, ".a"]] ""
-    OS.FreeBSD -> liftM ((== "Contents") . head . words . (!! 2) . lines) $
-        readProcess "readelf" ["--debug-dump=info", "--dwarf-depth=1", concat [dir, "/lib", lib, "-ghc", ver, ".a"]] ""
-    OS.Windows -> return False -- No support, so it can't be there.
-    _          -> return False
+hasDebuggingSymbols dir lib = do
+    let path = concat [dir, "/lib", lib, ".a"]
+    exists <- doesFileExist path
+    if not exists then return False
+    else case OS.buildOS of
+        OS.OSX     -> liftM (any (isPrefixOf "0x") . lines) $
+            readProcess "dwarfdump" [path] ""
+        OS.Linux   -> liftM (any (isPrefixOf "Contents") . lines) $
+            readProcess "readelf" ["--debug-dump=info", "--dwarf-depth=1", path] ""
+        OS.FreeBSD -> liftM (any (isPrefixOf "Contents") . lines) $
+            readProcess "readelf" ["--debug-dump=info", "--dwarf-depth=1", path] ""
+        OS.Windows -> return False -- No support, so it can't be there.
+        _          -> return False
 
 
 -- | Dump information for a single package
 data DumpPackage profiling haddock symbols = DumpPackage
     { dpGhcPkgId :: !GhcPkgId
     , dpPackageIdent :: !PackageIdentifier
+    , dpLicense :: !(Maybe C.License)
     , dpLibDirs :: ![FilePath]
     , dpLibraries :: ![Text]
     , dpHasExposedModules :: !Bool
+    , dpExposedModules :: ![Text]
     , dpDepends :: ![GhcPkgId]
     , dpHaddockInterfaces :: ![FilePath]
     , dpHaddockHtml :: !(Maybe FilePath)
@@ -301,7 +294,7 @@ data DumpPackage profiling haddock symbols = DumpPackage
     , dpSymbols :: !symbols
     , dpIsExposed :: !Bool
     }
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq)
 
 data PackageDumpException
     = MissingSingleField Text (Map Text [Line])
@@ -356,6 +349,10 @@ conduitDumpPackage = (=$= CL.catMaybes) $ eachSection $ do
                 libraries = parseM "hs-libraries"
                 exposedModules = parseM "exposed-modules"
                 exposed = parseM "exposed"
+                license =
+                    case parseM "license" of
+                        [licenseText] -> C.simpleParse (T.unpack licenseText)
+                        _ -> Nothing
             depends <- mapMaybeM parseDepend $ concatMap T.words $ parseM "depends"
 
             let parseQuoted key =
@@ -371,9 +368,11 @@ conduitDumpPackage = (=$= CL.catMaybes) $ eachSection $ do
             return $ Just DumpPackage
                 { dpGhcPkgId = ghcPkgId
                 , dpPackageIdent = PackageIdentifier name version
+                , dpLicense = license
                 , dpLibDirs = libDirPaths
                 , dpLibraries = T.words $ T.unwords libraries
                 , dpHasExposedModules = not (null libraries || null exposedModules)
+                , dpExposedModules = T.words $ T.unwords exposedModules
                 , dpDepends = depends
                 , dpHaddockInterfaces = haddockInterfaces
                 , dpHaddockHtml = listToMaybe haddockHtml

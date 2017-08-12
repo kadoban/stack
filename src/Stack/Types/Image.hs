@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -7,19 +8,14 @@
 module Stack.Types.Image where
 
 import Data.Aeson.Extended
-import Data.Monoid
-import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (maybeToList)
-import Data.Text (Text)
-import GHC.Generics (Generic)
 import Generics.Deriving.Monoid (mappenddefault, memptydefault)
 import Path
-import Prelude -- Fix redundant import warnings
+import Stack.Prelude
 
 -- | Image options. Currently only Docker image options.
-data ImageOpts = ImageOpts
-    { imgDockers :: ![ImageDockerOpts]
+newtype ImageOpts = ImageOpts
+    { imgDockers :: [ImageDockerOpts]
       -- ^ One or more stanzas for docker image settings.
     } deriving (Show)
 
@@ -39,8 +35,8 @@ data ImageDockerOpts = ImageDockerOpts
       -- ^ Filenames of executables to add (if Nothing, add them all)
     } deriving (Show)
 
-data ImageOptsMonoid = ImageOptsMonoid
-    { imgMonoidDockers :: ![ImageDockerOpts]
+newtype ImageOptsMonoid = ImageOptsMonoid
+    { imgMonoidDockers :: [ImageDockerOpts]
     } deriving (Show, Generic)
 
 instance FromJSON (WithJSONWarnings ImageOptsMonoid) where

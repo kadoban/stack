@@ -22,8 +22,8 @@ synonyms in the `--help` output. These commands are:
 * `stack install` is the same as `stack build --copy-bins`
 
 The advantage of the synonym commands is that they're convenient and short. The
-advantage of the options is that they compose. For example, `stack build --test
---copy-bins` will build libraries, executables, and test suites, run the test
+advantage of the options is that they compose. For example, `stack build --test --copy-bins`
+will build libraries, executables, and test suites, run the test
 suites, and then copy the executables to your local bin path (more on this
 below).
 
@@ -56,8 +56,8 @@ benchmarks. If you want more control over a package, you must add it to your
 
 ## Target syntax
 
-In addition to a number of options (like the aforementioned `--test`), `stack
-build` takes a list of zero or more *targets* to be built. There are a number
+In addition to a number of options (like the aforementioned `--test`), `stack build`
+takes a list of zero or more *targets* to be built. There are a number
 of different syntaxes supported for this list:
 
 *   *package*, e.g. `stack build foobar`, is the most commonly used target. It
@@ -86,6 +86,7 @@ of different syntaxes supported for this list:
 
     * `packagename:comptype:compname` is the most explicit. The available
       comptypes are `exe`, `test`, and `bench`.
+        * Side note: When any `exe` component is specified, all of the package's executable components will be built.  This is due to limitations in all currently released versions of Cabal.  See [issue#1046](https://github.com/commercialhaskell/stack/issues/1406)
     * `packagename:compname` allows you to leave off the component type, as
       that will (almost?) always be redundant with the component name. For
       example, `stack build mypackage:mytestsuite`.
@@ -94,8 +95,7 @@ of different syntaxes supported for this list:
       have a component with the same name. To continue the above example,
       `stack build :mytestsuite`.
         * Side note: the commonly requested `run` command is not available
-          because it's a simple combination of `stack build :exename && stack
-          exec exename`
+          because it's a simple combination of `stack build :exename && stack exec exename`
 
 * *directory*, e.g. `stack build foo/bar`, will find all local packages that
   exist in the given directory hierarchy and then follow the same procedure as
@@ -106,8 +106,7 @@ of different syntaxes supported for this list:
 
 Finally: if you provide no targets (e.g., running `stack build`), stack will
 implicitly pass in all of your local packages. If you only want to target
-packages in the current directory or deeper, you can pass in `.`, e.g. `stack
-build .`.
+packages in the current directory or deeper, you can pass in `.`, e.g. `stack build .`.
 
 To get a list of the available targets in your project, use `stack ide targets`.
 
@@ -140,6 +139,14 @@ following flags:
 
 * `--keep-going`, to continue building packages even after some build step
   fails. The packages which depend upon the failed build won't get built.
+
+* `--skip`, to skip building components of a local package. It allows
+  you to skip test suites and benchmark without specifying other components
+  (e.g. `stack test --skip long-test-suite` will run the tests without the
+  `long-test-suite` test suite). Be aware that skipping executables won't work
+  the first time the package is built due to 
+  [an issue in cabal](https://github.com/commercialhaskell/stack/issues/3229).
+  This option can be specified multiple times to skip multiple components. 
 
 ## Flags
 

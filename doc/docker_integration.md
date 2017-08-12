@@ -1,6 +1,10 @@
 Docker integration
 ===============================================================================
 
+**Note:** This page is mainly about building Haskell packages inside docker containers.
+If you want to deploy your built Haskell programs into a docker container,
+look [here](GUIDE.md#docker) instead.
+
 `stack` has support for automatically performing builds inside a Docker
 container, using volume mounts and user ID switching to make it mostly seamless.
 FP Complete provides images for use with stack that include GHC, tools, and
@@ -27,9 +31,9 @@ distribution
 a 64-bit kernel. If you do not already have one, we suggest Ubuntu 14.04
 ("trusty") since this is what we test with.
 
-**Mac OS X**: [Docker for Mac](https://docs.docker.com/docker-for-mac/) is the
-supported way to use Docker integration on OS X (the older Docker Machine
-(boot2docker) approach to using Docker on OS X is not supported due to issues
+**macOS**: [Docker for Mac](https://docs.docker.com/docker-for-mac/) is the
+supported way to use Docker integration on macOS (the older Docker Machine
+(boot2docker) approach to using Docker on macOS is not supported due to issues
 with host volume mounting that make Stack nearly unusable for anything but the
 most trivial projects).
 
@@ -137,8 +141,8 @@ behaviour.
 ### reset - Reset the Docker "sandbox"
 
 In order to preserve the contents of the in-container home directory between
-runs, a special "sandbox" directory is volume-mounted into the container. `stack
-docker reset` will reset that sandbox to its defaults.
+runs, a special "sandbox" directory is volume-mounted into the container.
+`stack docker reset` will reset that sandbox to its defaults.
 
 Note: `~/.stack` is separately volume-mounted, and is left alone during reset.
 
@@ -268,19 +272,6 @@ FP Complete provides the following public image repositories on Docker Hub:
 - [fpco/stack-build](https://registry.hub.docker.com/u/fpco/stack-build/) (the
   default) - GHC (patched), tools (stack, cabal-install, happy, alex, etc.), and
   system developer libraries required to build all Stackage packages.
-- [fpco/stack-ghcjs-build](https://registry.hub.docker.com/u/fpco/stack-ghcjs-build/) -
-  Like `stack-build`, but adds GHCJS.
-- [fpco/stack-full](https://registry.hub.docker.com/u/fpco/stack-full/) -
-  Includes all Stackage packages pre-installed in GHC's global package database.
-  These images are over 10 GB!
-- [fpco/stack-ghcjs-full](https://registry.hub.docker.com/u/fpco/stack-ghcjs-full/) -
-  Like `stack-full`, but adds GHCJS.
-- [fpco/stack-run](https://registry.hub.docker.com/u/fpco/stack-run/) -
-  Runtime environment for binaries built with Stackage. Includes system shared
-  libraries required by all Stackage packages. Does not necessarily include all
-  data required for every use (e.g. has texlive-binaries for HaTeX, but does not
-  include LaTeX fonts), as that would be prohibitively large. Based on
-  [phusion/baseimage](https://registry.hub.docker.com/u/phusion/baseimage/).
 
 FP Complete also builds custom variants of these images for their clients.
 
@@ -323,8 +314,8 @@ Additional notes
 ### Volume-mounts and ephemeral containers
 
 Since filesystem changes outside of the volume-mounted project directory are not
-persisted across runs, this means that if you `stack exec sudo apt-get install
-some-ubuntu-package`, that package will be installed but then the container it's
+persisted across runs, this means that if you `stack exec sudo apt-get install some-ubuntu-package`,
+that package will be installed but then the container it's
 installed in will disappear, thus causing it to have no effect. If you wish to
 make this kind of change permanent, see later instructions for how to create a
 [derivative Docker image](#derivative-image).
@@ -353,8 +344,8 @@ and publish port 3000.
 
 If you do want to do all your work, including editing, in the container, it
 might be better to use a persistent container in which you can install Ubuntu
-packages. You could get that by running something like `stack
---docker-container-name=NAME --docker-persist exec --plain bash`. This
+packages. You could get that by running something like
+`stack --docker-container-name=NAME --docker-persist exec --plain bash`. This
 means when the container exits, it won't be deleted. You can then restart it
 using `docker start -a -i NAME`. It's also possible to detach from a container
 while it continues running in the background using by pressing Ctrl-P Ctrl-Q,
@@ -419,17 +410,16 @@ Troubleshooting
 ### "No Space Left on Device", but 'df' shows plenty of disk space
 
 This is likely due to the storage driver Docker is using, in combination with
-the large size and number of files in these images. Use `docker info|grep
-'Storage Driver'` to determine the current storage driver.
+the large size and number of files in these images. Use `docker info|grep 'Storage Driver'`
+to determine the current storage driver.
 
 We recommend using either the `overlay` or `aufs` storage driver for stack, as
 they are least likely to give you trouble.  On Ubuntu, `aufs` is the default for
 new installations, but older installations sometimes used `devicemapper`.
 
-The `devicemapper` storage driver's default configuration limits it to a 10 GB
-file system, which the "full" images exceed. We have experienced other
-instabilities with it as well on Ubuntu, and recommend against its use for this
-purpose.
+The `devicemapper` storage driver's doesn't work well with large filesystems,
+and we have experienced other instabilities with it as well. We recommend
+against its use.
 
 The `btrfs` storage driver has problems running out of metadata space long
 before running out of actual disk space, which requires rebalancing or adding
@@ -467,9 +457,8 @@ change to take effect:
 <small>
 The above commands turn off `dnsmasq` usage in NetworkManager
 configuration and restart network manager.  They can be reversed by executing
-`sudo sed 's@#dns=dnsmasq@dns=dnsmasq@' -i
-/etc/NetworkManager/NetworkManager.conf && sudo service network-manager
-restart`.  These instructions are adapted from
+`sudo sed 's@#dns=dnsmasq@dns=dnsmasq@' -i /etc/NetworkManager/NetworkManager.conf && sudo service network-manager restart`.
+These instructions are adapted from
 [the Shipyard Project's QuickStart guide](https://github.com/shipyard/shipyard/wiki/QuickStart#127011-dns-server-problem-on-ubuntu).
 </small>
 

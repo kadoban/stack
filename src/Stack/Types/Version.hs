@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -27,44 +28,35 @@ module Stack.Types.Version
   ,toMajorVersion
   ,latestApplicableVersion
   ,checkVersion
-  ,nextMajorVersion)
+  ,nextMajorVersion
+  ,UpgradeTo(..))
   where
 
-import           Control.Applicative
-import           Control.DeepSeq
-import           Control.Monad.Catch
+import           Stack.Prelude hiding (Vector)
 import           Data.Aeson.Extended
 import           Data.Attoparsec.Text
-import           Data.Data
-import           Data.Hashable
+import           Data.Hashable (Hashable (..))
 import           Data.List
-import           Data.Map (Map)
-import qualified Data.Map as Map
-import           Data.Maybe (listToMaybe)
-import           Data.Monoid
-import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Store (Store)
-import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
-import           Data.Word
 import           Distribution.Text (disp)
 import qualified Distribution.Version as Cabal
-import           GHC.Generics
 import           Language.Haskell.TH
 import           Language.Haskell.TH.Syntax
-import           Prelude -- Fix warning: Word in Prelude from base-4.8.
 import           Text.PrettyPrint (render)
 
 -- | A parse fail.
-data VersionParseFail =
+newtype VersionParseFail =
   VersionParseFail Text
   deriving (Typeable)
 instance Exception VersionParseFail
 instance Show VersionParseFail where
     show (VersionParseFail bs) = "Invalid version: " ++ show bs
+
+-- | A Package upgrade; Latest or a specific version.
+data UpgradeTo = Specific Version | Latest deriving (Show)
 
 -- | A package version.
 newtype Version =
@@ -95,14 +87,9 @@ instance FromJSON Version where
          Nothing ->
            fail ("Couldn't parse package version: " ++ s)
          Just ver -> return ver
-instance FromJSON a => FromJSON (Map Version a) where
-    parseJSON val = do
-        m <- parseJSON val
-        fmap Map.fromList $ mapM go $ Map.toList m
-      where
-        go (k, v) = do
-            k' <- either (fail . show) return $ parseVersionFromString k
-            return (k', v)
+instance FromJSONKey Version where
+  fromJSONKey = FromJSONKeyTextParser $ \k ->
+    either (fail . show) return $ parseVersion k
 
 newtype IntersectingVersionRange =
     IntersectingVersionRange { getIntersectingVersionRange :: Cabal.VersionRange }
@@ -164,7 +151,7 @@ fromCabalVersion (Cabal.Version vs _) =
 mkVersion :: String -> Q Exp
 mkVersion s =
   case parseVersionFromString s of
-    Nothing -> error ("Invalid package version: " ++ show s)
+    Nothing -> qRunIO $ throwString ("Invalid package version: " ++ show s)
     Just pn -> [|pn|]
 
 -- | Display a version range

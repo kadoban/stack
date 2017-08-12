@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -8,60 +9,76 @@
 
 module Stack.Types.PackageIndex
     ( PackageDownload (..)
+    , HSPackageDownload (..)
     , PackageCache (..)
-    , PackageCacheMap (..)
+    , OffsetSize (..)
     -- ** PackageIndex, IndexName & IndexLocation
     , PackageIndex(..)
     , IndexName(..)
     , indexNameText
-    , IndexLocation(..)
+    , IndexType (..)
+    , HackageSecurity (..)
     ) where
 
-import           Control.DeepSeq (NFData)
-import           Control.Monad (mzero)
 import           Data.Aeson.Extended
-import           Data.ByteString (ByteString)
-import           Data.Hashable (Hashable)
-import           Data.Data (Data, Typeable)
-import           Data.Int (Int64)
-import           Data.Map (Map)
+import qualified Data.Foldable as F
+import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Map.Strict as Map
-import           Data.Store (Store)
-import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Text.Encoding (encodeUtf8, decodeUtf8)
-import           Data.Word (Word64)
-import           GHC.Generics (Generic)
 import           Path
+import           Stack.Prelude
+import           Stack.Types.PackageName
 import           Stack.Types.PackageIdentifier
+import           Stack.Types.Version
+import           Data.List.NonEmpty (NonEmpty)
 
-data PackageCache = PackageCache
-    { pcOffset :: !Int64
-    -- ^ offset in bytes into the 00-index.tar file for the .cabal file contents
-    , pcSize :: !Int64
-    -- ^ size in bytes of the .cabal file
-    , pcDownload :: !(Maybe PackageDownload)
-    }
+-- | Cached information about packages in an index. We have a mapping
+-- from package name to a version map. Within the version map, we map
+-- from the version to information on an individual version. Each
+-- version has optional download information (about the package's
+-- tarball itself), and cabal file information. The cabal file
+-- information is a non-empty list of all cabal file revisions. Each
+-- file revision indicates the hash of the contents of the cabal file,
+-- and the offset into the index tarball.
+--
+-- It's assumed that cabal files appear in the index tarball in the
+-- correct revision order.
+newtype PackageCache index = PackageCache
+  (HashMap PackageName
+  (HashMap Version
+   (index, Maybe PackageDownload, NonEmpty ([CabalHash], OffsetSize))))
+  deriving (Generic, Eq, Show, Data, Typeable, Store, NFData)
+
+instance Monoid (PackageCache index) where
+  mempty = PackageCache HashMap.empty
+  mappend (PackageCache x) (PackageCache y) = PackageCache (HashMap.unionWith HashMap.union x y)
+
+-- | offset in bytes into the 01-index.tar file for the .cabal file
+-- contents, and size in bytes of the .cabal file
+data OffsetSize = OffsetSize !Int64 !Int64
     deriving (Generic, Eq, Show, Data, Typeable)
 
-instance Store PackageCache
-instance NFData PackageCache
-
-newtype PackageCacheMap = PackageCacheMap (Map PackageIdentifier PackageCache)
-    deriving (Generic, Store, NFData, Eq, Show, Data, Typeable)
+instance Store OffsetSize
+instance NFData OffsetSize
 
 data PackageDownload = PackageDownload
-    { pdSHA512 :: !ByteString
+    { pdSHA256 :: !StaticSHA256
     , pdUrl    :: !ByteString
     , pdSize   :: !Word64
     }
     deriving (Show, Generic, Eq, Data, Typeable)
+
 instance Store PackageDownload
 instance NFData PackageDownload
 instance FromJSON PackageDownload where
-    parseJSON = withObject "Package" $ \o -> do
+    parseJSON = withObject "PackageDownload" $ \o -> do
         hashes <- o .: "package-hashes"
-        sha512 <- maybe mzero return (Map.lookup ("SHA512" :: Text) hashes)
+        sha256' <- maybe mzero return (Map.lookup ("SHA256" :: Text) hashes)
+        sha256 <-
+          case mkStaticSHA256FromText sha256' of
+            Left e -> fail $ "Invalid sha256: " ++ show e
+            Right x -> return x
         locs <- o .: "package-locations"
         url <-
             case reverse locs of
@@ -69,9 +86,30 @@ instance FromJSON PackageDownload where
                 x:_ -> return x
         size <- o .: "package-size"
         return PackageDownload
-            { pdSHA512 = encodeUtf8 sha512
+            { pdSHA256 = sha256
             , pdUrl = encodeUtf8 url
             , pdSize = size
+            }
+
+-- | Hackage Security provides a different JSON format, we'll have our
+-- own JSON parser for it.
+newtype HSPackageDownload = HSPackageDownload { unHSPackageDownload :: PackageDownload }
+instance FromJSON HSPackageDownload where
+    parseJSON = withObject "HSPackageDownload" $ \o1 -> do
+        o2 <- o1 .: "signed"
+        Object o3 <- o2 .: "targets"
+        Object o4:_ <- return $ F.toList o3
+        len <- o4 .: "length"
+        hashes <- o4 .: "hashes"
+        sha256' <- hashes .: "sha256"
+        sha256 <-
+          case mkStaticSHA256FromText sha256' of
+            Left e -> fail $ "Invalid sha256: " ++ show e
+            Right x -> return x
+        return $ HSPackageDownload PackageDownload
+            { pdSHA256 = sha256
+            , pdSize = len
+            , pdUrl = ""
             }
 
 -- | Unique name for a package index
@@ -88,21 +126,28 @@ instance FromJSON IndexName where
             Left e -> fail $ "Invalid index name: " ++ show e
             Right _ -> return $ IndexName $ encodeUtf8 t
 
--- | Location of the package index. This ensures that at least one of Git or
--- HTTP is available.
-data IndexLocation = ILGit !Text | ILHttp !Text | ILGitHttp !Text !Text
+data IndexType = ITHackageSecurity !HackageSecurity | ITVanilla
     deriving (Show, Eq, Ord)
 
+data HackageSecurity = HackageSecurity
+    { hsKeyIds :: ![Text]
+    , hsKeyThreshold :: !Int
+    }
+    deriving (Show, Eq, Ord)
+instance FromJSON HackageSecurity where
+    parseJSON = withObject "HackageSecurity" $ \o -> HackageSecurity
+        <$> o .: "keyids"
+        <*> o .: "key-threshold"
 
 -- | Information on a single package index
 data PackageIndex = PackageIndex
     { indexName :: !IndexName
-    , indexLocation :: !IndexLocation
+    , indexLocation :: !Text
+    -- ^ URL for the tarball or, in the case of Hackage Security, the
+    -- root of the directory
+    , indexType :: !IndexType
     , indexDownloadPrefix :: !Text
     -- ^ URL prefix for downloading packages
-    , indexGpgVerify :: !Bool
-    -- ^ GPG-verify the package index during download. Only applies to Git
-    -- repositories for now.
     , indexRequireHashes :: !Bool
     -- ^ Require that hashes and package size information be available for packages in this index
     }
@@ -111,22 +156,14 @@ instance FromJSON (WithJSONWarnings PackageIndex) where
     parseJSON = withObjectWarnings "PackageIndex" $ \o -> do
         name <- o ..: "name"
         prefix <- o ..: "download-prefix"
-        mgit <- o ..:? "git"
-        mhttp <- o ..:? "http"
-        loc <-
-            case (mgit, mhttp) of
-                (Nothing, Nothing) -> fail $
-                    "Must provide either Git or HTTP URL for " ++
-                    T.unpack (indexNameText name)
-                (Just git, Nothing) -> return $ ILGit git
-                (Nothing, Just http) -> return $ ILHttp http
-                (Just git, Just http) -> return $ ILGitHttp git http
-        gpgVerify <- o ..:? "gpg-verify" ..!= False
+        http <- o ..: "http"
+        mhackageSecurity <- o ..:? "hackage-security"
+        let indexType' = maybe ITVanilla ITHackageSecurity mhackageSecurity
         reqHashes <- o ..:? "require-hashes" ..!= False
         return PackageIndex
             { indexName = name
-            , indexLocation = loc
+            , indexLocation = http
+            , indexType = indexType'
             , indexDownloadPrefix = prefix
-            , indexGpgVerify = gpgVerify
             , indexRequireHashes = reqHashes
             }

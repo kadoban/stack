@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TemplateHaskell       #-}
@@ -31,40 +32,26 @@ module Stack.Build.Cache
     , BuildCache(..)
     ) where
 
-import           Control.Applicative
-import           Control.DeepSeq (NFData)
-import           Control.Exception.Safe (handleIO, tryAnyDeep)
-import           Control.Monad (liftM)
-import           Control.Monad.Catch (MonadThrow, MonadCatch)
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger (MonadLogger, logDebug)
-import           Control.Monad.Reader (MonadReader, asks)
-import           Control.Monad.Trans.Control (MonadBaseControl)
-import qualified Crypto.Hash.SHA256 as SHA256
+import           Stack.Prelude
+import           Crypto.Hash (hashWith, SHA256(..))
 import           Data.Binary (Binary (..))
 import qualified Data.Binary as Binary
 import           Data.Binary.Tagged (HasStructuralInfo, HasSemanticVersion)
 import qualified Data.Binary.Tagged as BinaryTagged
-import qualified Data.ByteString.Base16 as B16
+import qualified Data.ByteArray as Mem (convert)
+import qualified Data.ByteArray.Encoding as Mem (convertToBase, Base(Base16))
 import qualified Data.ByteString.Base64.URL as B64URL
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as LBS
-import           Data.Foldable (forM_)
-import           Data.Map (Map)
 import qualified Data.Map as M
-import           Data.Maybe (fromMaybe, mapMaybe)
-import           Data.Monoid ((<>))
-import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Store as Store
 import           Data.Store.VersionTagged
-import           Data.Text (Text)
 import qualified Data.Text as T
-import           Data.Traversable (forM)
 import           Path
 import           Path.IO
-import           Prelude -- Fix redundant import warnings
-import           Stack.Constants
+import           Stack.Constants.Config
 import           Stack.Types.Build
 import           Stack.Types.Compiler
 import           Stack.Types.Config
@@ -97,7 +84,7 @@ getInstalledExes loc = do
         mapMaybe (parsePackageIdentifierFromString . toFilePath . filename) files
 
 -- | Mark the given executable as installed
-markExeInstalled :: (MonadReader env m, HasEnvConfig env, MonadIO m, MonadCatch m)
+markExeInstalled :: (MonadReader env m, HasEnvConfig env, MonadIO m, MonadThrow m)
                  => InstallLocation -> PackageIdentifier -> m ()
 markExeInstalled loc ident = do
     dir <- exeInstalledDir loc
@@ -112,28 +99,28 @@ markExeInstalled loc ident = do
     -- TODO consideration for the future: list all of the executables
     -- installed, and invalidate this file in getInstalledExes if they no
     -- longer exist
-    liftIO $ writeFile fp "Installed"
+    liftIO $ B.writeFile fp "Installed"
 
 -- | Mark the given executable as not installed
-markExeNotInstalled :: (MonadReader env m, HasEnvConfig env, MonadIO m, MonadCatch m)
+markExeNotInstalled :: (MonadReader env m, HasEnvConfig env, MonadIO m, MonadThrow m)
                     => InstallLocation -> PackageIdentifier -> m ()
 markExeNotInstalled loc ident = do
     dir <- exeInstalledDir loc
     ident' <- parseRelFile $ packageIdentifierString ident
-    ignoringAbsence (removeFile $ dir </> ident')
+    liftIO $ ignoringAbsence (removeFile $ dir </> ident')
 
 -- | Try to read the dirtiness cache for the given package directory.
-tryGetBuildCache :: (MonadIO m, MonadReader env m, MonadThrow m, MonadLogger m, HasEnvConfig env, MonadBaseControl IO m)
+tryGetBuildCache :: (MonadUnliftIO m, MonadReader env m, MonadThrow m, MonadLogger m, HasEnvConfig env)
                  => Path Abs Dir -> m (Maybe (Map FilePath FileCacheInfo))
 tryGetBuildCache dir = liftM (fmap buildCacheTimes) . $(versionedDecodeFile buildCacheVC) =<< buildCacheFile dir
 
 -- | Try to read the dirtiness cache for the given package directory.
-tryGetConfigCache :: (MonadIO m, MonadReader env m, MonadThrow m, HasEnvConfig env, MonadBaseControl IO m, MonadLogger m)
+tryGetConfigCache :: (MonadUnliftIO m, MonadReader env m, MonadThrow m, HasEnvConfig env, MonadLogger m)
                   => Path Abs Dir -> m (Maybe ConfigCache)
 tryGetConfigCache dir = $(versionedDecodeFile configCacheVC) =<< configCacheFile dir
 
 -- | Try to read the mod time of the cabal file from the last build
-tryGetCabalMod :: (MonadIO m, MonadReader env m, MonadThrow m, HasEnvConfig env, MonadBaseControl IO m, MonadLogger m)
+tryGetCabalMod :: (MonadUnliftIO m, MonadReader env m, MonadThrow m, HasEnvConfig env, MonadLogger m)
                => Path Abs Dir -> m (Maybe ModTime)
 tryGetCabalMod dir = $(versionedDecodeFile modTimeVC) =<< configCabalMod dir
 
@@ -165,7 +152,7 @@ writeCabalMod dir x = do
     $(versionedEncodeFile modTimeVC) fp x
 
 -- | Delete the caches for the project.
-deleteCaches :: (MonadIO m, MonadReader env m, MonadCatch m, HasEnvConfig env)
+deleteCaches :: (MonadIO m, MonadReader env m, HasEnvConfig env, MonadThrow m)
              => Path Abs Dir -> m ()
 deleteCaches dir = do
     {- FIXME confirm that this is acceptable to remove
@@ -173,7 +160,7 @@ deleteCaches dir = do
     removeFileIfExists bfp
     -}
     cfp <- configCacheFile dir
-    ignoringAbsence (removeFile cfp)
+    liftIO $ ignoringAbsence (removeFile cfp)
 
 flagCacheFile :: (MonadIO m, MonadThrow m, MonadReader env m, HasEnvConfig env)
               => Installed
@@ -187,7 +174,7 @@ flagCacheFile installed = do
     return $ dir </> rel
 
 -- | Loads the flag cache for the given installed extra-deps
-tryGetFlagCache :: (MonadIO m, MonadThrow m, MonadReader env m, HasEnvConfig env, MonadBaseControl IO m, MonadLogger m)
+tryGetFlagCache :: (MonadUnliftIO m, MonadThrow m, MonadReader env m, HasEnvConfig env, MonadLogger m)
                 => Installed
                 -> m (Maybe ConfigCache)
 tryGetFlagCache gid = do
@@ -220,7 +207,7 @@ unsetTestSuccess dir = do
     $(versionedEncodeFile testSuccessVC) fp False
 
 -- | Check if the test suite already passed
-checkTestSuccess :: (MonadIO m, MonadThrow m, MonadReader env m, HasEnvConfig env, MonadBaseControl IO m, MonadLogger m)
+checkTestSuccess :: (MonadUnliftIO m, MonadThrow m, MonadReader env m, HasEnvConfig env, MonadLogger m)
                  => Path Abs Dir
                  -> m Bool
 checkTestSuccess dir =
@@ -251,10 +238,10 @@ precompiledCacheFile :: (MonadThrow m, MonadReader env m, HasEnvConfig env, Mona
                      -> Set GhcPkgId -- ^ dependencies
                      -> m (Path Abs File, m (Path Abs File))
 precompiledCacheFile pkgident copts installedPackageIDs = do
-    ec <- asks getEnvConfig
+    ec <- view envConfigL
 
-    compiler <- parseRelDir $ compilerVersionString $ envConfigCompilerVersion ec
-    cabal <- parseRelDir $ versionString $ envConfigCabalVersion ec
+    compiler <- view actualCompilerVersionL >>= parseRelDir . compilerVersionString
+    cabal <- view cabalVersionL >>= parseRelDir . versionString
     pkg <- parseRelDir $ packageIdentifierString pkgident
     platformRelDir <- platformGhcRelDir
 
@@ -265,13 +252,13 @@ precompiledCacheFile pkgident copts installedPackageIDs = do
     -- Unfortunately, earlier Cabals don't have the information, so we must
     -- supplement it with the installed package IDs directly.
     -- See issue: https://github.com/commercialhaskell/stack/issues/1103
-    let oldHash = B16.encode $ SHA256.hash $ LBS.toStrict $
-            if envConfigCabalVersion ec >= $(mkVersion "1.22")
+    let oldHash = Mem.convertToBase Mem.Base16 $ hashWith SHA256 $ LBS.toStrict $
+            if view cabalVersionL ec >= $(mkVersion "1.22")
                 then Binary.encode (coNoDirs copts)
                 else Binary.encode input
         hashToPath hash = do
             hashPath <- parseRelFile $ S8.unpack hash
-            return $ getStackRoot ec
+            return $ view stackRootL ec
                  </> $(mkRelDir "precompiled")
                  </> platformRelDir
                  </> compiler
@@ -279,8 +266,7 @@ precompiledCacheFile pkgident copts installedPackageIDs = do
                  </> pkg
                  </> hashPath
 
-    $logDebug $ "Precompiled cache input = " <> T.pack (show input)
-    newPath <- hashToPath $ B64URL.encode $ SHA256.hash $ Store.encode input
+    newPath <- hashToPath $ B64URL.encode $ Mem.convert $ hashWith SHA256 $ Store.encode input
     return (newPath, hashToPath oldHash)
 
 -- | Write out information about a newly built package
@@ -295,8 +281,8 @@ writePrecompiledCache :: (MonadThrow m, MonadReader env m, HasEnvConfig env, Mon
 writePrecompiledCache baseConfigOpts pkgident copts depIDs mghcPkgId exes = do
     (file, _) <- precompiledCacheFile pkgident copts depIDs
     ensureDir (parent file)
-    ec <- asks getEnvConfig
-    let stackRootRelative = makeRelative (getStackRoot ec)
+    ec <- view envConfigL
+    let stackRootRelative = makeRelative (view stackRootL ec)
     mlibpath <-
         case mghcPkgId of
             Executable _ -> return Nothing
@@ -315,17 +301,17 @@ writePrecompiledCache baseConfigOpts pkgident copts depIDs mghcPkgId exes = do
 
 -- | Check the cache for a precompiled package matching the given
 -- configuration.
-readPrecompiledCache :: (MonadThrow m, MonadReader env m, HasEnvConfig env, MonadIO m, MonadLogger m, MonadBaseControl IO m)
+readPrecompiledCache :: (MonadThrow m, MonadReader env m, HasEnvConfig env, MonadUnliftIO m, MonadLogger m)
                      => PackageIdentifier -- ^ target package
                      -> ConfigureOpts
                      -> Set GhcPkgId -- ^ dependencies
                      -> m (Maybe PrecompiledCache)
 readPrecompiledCache pkgident copts depIDs = do
-    ec <- asks getEnvConfig
+    ec <- view envConfigL
     let toAbsPath path = do
           if FilePath.isAbsolute path
               then path -- Only older version store absolute path
-              else toFilePath (getStackRoot ec) FilePath.</> path
+              else toFilePath (view stackRootL ec) FilePath.</> path
     let toAbsPC pc =
             PrecompiledCache
                   { pcLibrary = fmap toAbsPath (pcLibrary pc)

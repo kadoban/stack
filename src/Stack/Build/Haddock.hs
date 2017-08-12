@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds       #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -16,31 +17,17 @@ module Stack.Build.Haddock
     , shouldHaddockDeps
     ) where
 
-import           Control.Exception (tryJust, onException)
-import           Control.Monad
-import           Control.Monad.Catch (MonadCatch)
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Trans.Resource
+import           Stack.Prelude
 import qualified Data.Foldable as F
-import           Data.Function
 import qualified Data.HashSet as HS
-import           Data.List
 import           Data.List.Extra (nubOrd)
-import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe
-import           Data.Maybe.Extra (mapMaybeM)
-import           Data.Monoid ((<>))
-import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Time (UTCTime)
 import           Path
 import           Path.Extra
 import           Path.IO
-import           Prelude
 import           Stack.PackageDump
 import           Stack.PrettyPrint
 import           Stack.Types.Build
@@ -50,20 +37,20 @@ import           Stack.Types.GhcPkgId
 import           Stack.Types.Package
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT (StackM)
+import           Stack.Types.Runner
 import qualified System.FilePath as FP
 import           System.IO.Error (isDoesNotExistError)
 import           System.Process.Read
 import           Web.Browser (openBrowser)
 
 openHaddocksInBrowser
-    :: StackM env m
+    :: HasRunner env
     => BaseConfigOpts
     -> Map PackageName (PackageIdentifier, InstallLocation)
     -- ^ Available packages and their locations for the current project
     -> Set PackageName
     -- ^ Build targets as determined by 'Stack.Build.Source.loadSourceMap'
-    -> m ()
+    -> RIO env ()
 openHaddocksInBrowser bco pkgLocations buildTargets = do
     let cliTargets = (boptsCLITargets . bcoBuildOptsCLI) bco
         getDocIndex = do
@@ -76,7 +63,7 @@ openHaddocksInBrowser bco pkgLocations buildTargets = do
                     snapExists <- doesFileExist snapDocs
                     if snapExists
                         then return snapDocs
-                        else fail "No local or snapshot doc index found to open."
+                        else throwString "No local or snapshot doc index found to open."
     docFile <-
         case (cliTargets, map (`Map.lookup` pkgLocations) (Set.toList buildTargets)) of
             ([_], [Just (pkgId, iloc)]) -> do
@@ -118,7 +105,7 @@ shouldHaddockDeps bopts = fromMaybe (boptsHaddock bopts) (boptsHaddockDeps bopts
 
 -- | Generate Haddock index and contents for local packages.
 generateLocalHaddockIndex
-    :: (MonadIO m, MonadCatch m, MonadLogger m, MonadBaseControl IO m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => EnvOverride
     -> WhichCompiler
     -> BaseConfigOpts
@@ -137,14 +124,14 @@ generateLocalHaddockIndex envOverride wc bco localDumpPkgs locals = do
         "local packages"
         envOverride
         wc
-        (boptsHaddockOpts (bcoBuildOpts bco))
+        bco
         dumpPackages
         "."
         (localDocDir bco)
 
 -- | Generate Haddock index and contents for local packages and their dependencies.
 generateDepsHaddockIndex
-    :: (MonadIO m, MonadCatch m, MonadLogger m, MonadBaseControl IO m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => EnvOverride
     -> WhichCompiler
     -> BaseConfigOpts
@@ -160,7 +147,7 @@ generateDepsHaddockIndex envOverride wc bco globalDumpPkgs snapshotDumpPkgs loca
         "local packages and dependencies"
         envOverride
         wc
-        (boptsHaddockOpts (bcoBuildOpts bco))
+        bco
         deps
         ".."
         depDocDir
@@ -189,7 +176,7 @@ generateDepsHaddockIndex envOverride wc bco globalDumpPkgs snapshotDumpPkgs loca
 
 -- | Generate Haddock index and contents for all snapshot packages.
 generateSnapHaddockIndex
-    :: (MonadIO m, MonadCatch m, MonadLogger m, MonadBaseControl IO m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => EnvOverride
     -> WhichCompiler
     -> BaseConfigOpts
@@ -201,23 +188,23 @@ generateSnapHaddockIndex envOverride wc bco globalDumpPkgs snapshotDumpPkgs =
         "snapshot packages"
         envOverride
         wc
-        (boptsHaddockOpts (bcoBuildOpts bco))
+        bco
         (Map.elems snapshotDumpPkgs ++ Map.elems globalDumpPkgs)
         "."
         (snapDocDir bco)
 
 -- | Generate Haddock index and contents for specified packages.
 generateHaddockIndex
-    :: (MonadIO m, MonadCatch m, MonadLogger m, MonadBaseControl IO m)
+    :: (MonadUnliftIO m, MonadLogger m)
     => Text
     -> EnvOverride
     -> WhichCompiler
-    -> HaddockOpts
+    -> BaseConfigOpts
     -> [DumpPackage () () ()]
     -> FilePath
     -> Path Abs Dir
     -> m ()
-generateHaddockIndex descr envOverride wc hdopts dumpPackages docRelFP destDir = do
+generateHaddockIndex descr envOverride wc bco dumpPackages docRelFP destDir = do
     ensureDir destDir
     interfaceOpts <- (liftIO . fmap nubOrd . mapMaybeM toInterfaceOpt) dumpPackages
     unless (null interfaceOpts) $ do
@@ -228,18 +215,25 @@ generateHaddockIndex descr envOverride wc hdopts dumpPackages docRelFP destDir =
                     Left _ -> True
                     Right indexModTime ->
                         or [mt > indexModTime | (_,mt,_,_) <- interfaceOpts]
-        when needUpdate $ do
-            $logInfo
-                (T.concat ["Updating Haddock index for ", descr, " in\n",
-                           T.pack (toFilePath destIndexFile)])
-            liftIO (mapM_ copyPkgDocs interfaceOpts)
-            readProcessNull
-                (Just destDir)
-                envOverride
-                (haddockExeName wc)
-                (hoAdditionalArgs hdopts ++
-                 ["--gen-contents", "--gen-index"] ++
-                 [x | (xs,_,_,_) <- interfaceOpts, x <- xs])
+        if needUpdate
+            then do
+                $logInfo
+                    (T.concat ["Updating Haddock index for ", descr, " in\n",
+                               T.pack (toFilePath destIndexFile)])
+                liftIO (mapM_ copyPkgDocs interfaceOpts)
+                readProcessNull
+                    (Just destDir)
+                    envOverride
+                    (haddockExeName wc)
+                    (map (("--optghc=-package-db=" ++ ) . toFilePathNoTrailingSep)
+                        [bcoSnapDB bco, bcoLocalDB bco] ++
+                     hoAdditionalArgs (boptsHaddockOpts (bcoBuildOpts bco)) ++
+                     ["--gen-contents", "--gen-index"] ++
+                     [x | (xs,_,_,_) <- interfaceOpts, x <- xs])
+            else
+              $logInfo
+                    (T.concat ["Haddock index for ", descr, " already up to date at:\n",
+                               T.pack (toFilePath destIndexFile)])
   where
     toInterfaceOpt :: DumpPackage a b c -> IO (Maybe ([String], UTCTime, Path Abs File, Path Abs File))
     toInterfaceOpt DumpPackage {..} =

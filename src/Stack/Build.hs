@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DeriveDataTypeable #-}
@@ -20,37 +21,21 @@ module Stack.Build
   ,CabalVersionException(..))
   where
 
-import           Control.Exception (Exception)
-import           Control.Monad
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Reader (MonadReader, asks)
-import           Control.Monad.Trans.Resource
-import           Control.Monad.Trans.Unlift (MonadBaseUnlift)
+import           Stack.Prelude
 import           Data.Aeson (Value (Object, Array), (.=), object)
-import           Data.Function
 import qualified Data.HashMap.Strict as HM
 import           Data.List ((\\))
 import           Data.List.Extra (groupSort)
 import           Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
-import           Data.Map.Strict (Map)
-import           Data.Maybe (catMaybes)
-import           Data.Monoid
-import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.String
-import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Text.Encoding (decodeUtf8)
 import qualified Data.Text.IO as TIO
 import           Data.Text.Read (decimal)
-import           Data.Typeable (Typeable)
 import qualified Data.Vector as V
 import qualified Data.Yaml as Yaml
-import           Path
-import           Prelude hiding (FilePath, writeFile)
 import           Stack.Build.ConstructPlan
 import           Stack.Build.Execute
 import           Stack.Build.Haddock
@@ -58,17 +43,15 @@ import           Stack.Build.Installed
 import           Stack.Build.Source
 import           Stack.Build.Target
 import           Stack.Fetch as Fetch
-import           Stack.GhcPkg
 import           Stack.Package
-import           Stack.PackageIndex
-import           Stack.PrettyPrint
+import           Stack.PackageLocation (loadSingleRawCabalFile)
 import           Stack.Types.Build
+import           Stack.Types.BuildPlan
 import           Stack.Types.Config
 import           Stack.Types.FlagName
 import           Stack.Types.Package
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT
 import           Stack.Types.Version
 
 #ifdef WINDOWS
@@ -78,7 +61,6 @@ import           System.FileLock (FileLock, unlockFile)
 
 #ifdef WINDOWS
 import           System.Win32.Console (setConsoleCP, setConsoleOutputCP, getConsoleCP, getConsoleOutputCP)
-import qualified Control.Monad.Catch as Catch
 #endif
 
 -- | Build.
@@ -86,21 +68,21 @@ import qualified Control.Monad.Catch as Catch
 --   If a buildLock is passed there is an important contract here.  That lock must
 --   protect the snapshot, and it must be safe to unlock it if there are no further
 --   modifications to the snapshot to be performed by this build.
-build :: (StackM env m, HasEnvConfig env, MonadBaseUnlift IO m)
+build :: HasEnvConfig env
       => (Set (Path Abs File) -> IO ()) -- ^ callback after discovering all local files
       -> Maybe FileLock
       -> BuildOptsCLI
-      -> m ()
+      -> RIO env ()
 build setLocalFiles mbuildLk boptsCli = fixCodePage $ do
-    bopts <- asks (configBuild . getConfig)
+    bopts <- view buildOptsL
     let profiling = boptsLibProfile bopts || boptsExeProfile bopts
-    let symbols = boptsLibStrip bopts || boptsExeStrip bopts
+    let symbols = not (boptsLibStrip bopts || boptsExeStrip bopts)
     menv <- getMinimalEnvOverride
 
-    (targets, mbp, locals, extraToBuild, extraDeps, sourceMap) <- loadSourceMapFull NeedTargets boptsCli
+    (targets, mbp, locals, extraToBuild, sourceMap) <- loadSourceMapFull NeedTargets boptsCli
 
     -- Set local files, necessary for file watching
-    stackYaml <- asks $ bcStackYaml . getBuildConfig
+    stackYaml <- view stackYamlL
     liftIO $ setLocalFiles
            $ Set.insert stackYaml
            $ Set.unions
@@ -114,11 +96,14 @@ build setLocalFiles mbuildLk boptsCli = fixCodePage $ do
                          , getInstalledSymbols   = symbols }
                      sourceMap
 
-    warnMissingExtraDeps installedMap extraDeps
-
     baseConfigOpts <- mkBaseConfigOpts boptsCli
-    plan <- withLoadPackage menv $ \loadPackage ->
-        constructPlan mbp baseConfigOpts locals extraToBuild localDumpPkgs loadPackage sourceMap installedMap
+    plan <- withLoadPackage $ \loadPackage ->
+        constructPlan mbp baseConfigOpts locals extraToBuild localDumpPkgs loadPackage sourceMap installedMap (boptsCLIInitialBuildSteps boptsCli)
+
+    allowLocals <- view $ configL.to configAllowLocals
+    unless allowLocals $ case justLocals plan of
+      [] -> return ()
+      localsIdents -> throwM $ LocalPackagesPresent localsIdents
 
     -- If our work to do is all local, let someone else have a turn with the snapshot.
     -- They won't damage what's already in there.
@@ -155,10 +140,17 @@ allLocal =
     Map.elems .
     planTasks
 
-checkCabalVersion :: (StackM env m, HasEnvConfig env) => m ()
+justLocals :: Plan -> [PackageIdentifier]
+justLocals =
+    map taskProvides .
+    filter ((== Local) . taskLocation) .
+    Map.elems .
+    planTasks
+
+checkCabalVersion :: HasEnvConfig env => RIO env ()
 checkCabalVersion = do
-    allowNewer <- asks (configAllowNewer . getConfig)
-    cabalVer <- asks (envConfigCabalVersion . getEnvConfig)
+    allowNewer <- view $ configL.to configAllowNewer
+    cabalVer <- view cabalVersionL
     -- https://github.com/haskell/cabal/issues/2023
     when (allowNewer && cabalVer < $(mkVersion "1.22")) $ throwM $
         CabalVersionException $
@@ -166,30 +158,11 @@ checkCabalVersion = do
             versionString cabalVer ++
             " was found."
 
-data CabalVersionException = CabalVersionException { unCabalVersionException :: String }
+newtype CabalVersionException = CabalVersionException { unCabalVersionException :: String }
     deriving (Typeable)
 
 instance Show CabalVersionException where show = unCabalVersionException
 instance Exception CabalVersionException
-
-warnMissingExtraDeps
-    :: (StackM env m, HasConfig env)
-    => InstalledMap -> Map PackageName Version -> m ()
-warnMissingExtraDeps installed extraDeps = do
-    missingExtraDeps <-
-        fmap catMaybes $ forM (Map.toList extraDeps) $ \(n, v) ->
-            if Map.member n installed
-                then return Nothing
-                else do
-                    vs <- getPackageVersions n
-                    if Set.null vs
-                        then return $ Just $
-                            fromString (packageNameString n ++ "-" ++ versionString v)
-                        else return Nothing
-    unless (null missingExtraDeps) $
-        $prettyWarn $
-            "Some extra-deps are neither installed nor in the index:" <> line <>
-            indent 4 (bulletedList missingExtraDeps)
 
 -- | See https://github.com/commercialhaskell/stack/issues/1198.
 warnIfExecutablesWithSameNameCouldBeOverwritten
@@ -282,7 +255,7 @@ splitObjsWarning = unwords
 mkBaseConfigOpts :: (MonadIO m, MonadReader env m, HasEnvConfig env, MonadThrow m)
                  => BuildOptsCLI -> m BaseConfigOpts
 mkBaseConfigOpts boptsCli = do
-    bopts <- asks (configBuild . getConfig)
+    bopts <- view buildOptsL
     snapDBPath <- packageDatabaseDeps
     localDBPath <- packageDatabaseLocal
     snapInstallRoot <- installationRootDeps
@@ -299,20 +272,25 @@ mkBaseConfigOpts boptsCli = do
         }
 
 -- | Provide a function for loading package information from the package index
-withLoadPackage :: (StackM env m, HasEnvConfig env, MonadBaseUnlift IO m)
-                => EnvOverride
-                -> ((PackageName -> Version -> Map FlagName Bool -> [Text] -> IO Package) -> m a)
-                -> m a
-withLoadPackage menv inner = do
-    econfig <- asks getEnvConfig
-    withCabalLoader menv $ \cabalLoader ->
-        inner $ \name version flags ghcOptions -> do
-            bs <- cabalLoader $ PackageIdentifier name version
+withLoadPackage :: HasEnvConfig env
+                => ((PackageLocationIndex FilePath -> Map FlagName Bool -> [Text] -> IO Package) -> RIO env a)
+                -> RIO env a
+withLoadPackage inner = do
+    econfig <- view envConfigL
+    menv <- getMinimalEnvOverride
+    root <- view projectRootL
+    run <- askRunInIO
+    withCabalLoader $ \loadFromIndex ->
+        inner $ \loc flags ghcOptions -> do
+            bs <- run $ loadSingleRawCabalFile loadFromIndex menv root loc
 
             -- Intentionally ignore warnings, as it's not really
             -- appropriate to print a bunch of warnings out while
             -- resolving the package index.
-            (_warnings,pkg) <- readPackageBS (depPackageConfig econfig flags ghcOptions) bs
+            (_warnings,pkg) <- readPackageBS
+              (depPackageConfig econfig flags ghcOptions)
+              loc
+              bs
             return pkg
   where
     -- | Package config to be used for dependencies
@@ -322,18 +300,18 @@ withLoadPackage menv inner = do
         , packageConfigEnableBenchmarks = False
         , packageConfigFlags = flags
         , packageConfigGhcOptions = ghcOptions
-        , packageConfigCompilerVersion = envConfigCompilerVersion econfig
-        , packageConfigPlatform = configPlatform (getConfig econfig)
+        , packageConfigCompilerVersion = view actualCompilerVersionL econfig
+        , packageConfigPlatform = view platformL econfig
         }
 
 -- | Set the code page for this process as necessary. Only applies to Windows.
 -- See: https://github.com/commercialhaskell/stack/issues/738
+fixCodePage :: HasEnvConfig env => RIO env a -> RIO env a
 #ifdef WINDOWS
-fixCodePage :: (StackM env m, HasBuildConfig env, HasEnvConfig env) => m a -> m a
 fixCodePage inner = do
-    mcp <- asks $ configModifyCodePage . getConfig
-    ec <- asks getEnvConfig
-    if mcp && getGhcVersion (envConfigCompilerVersion ec) < $(mkVersion "7.10.3")
+    mcp <- view $ configL.to configModifyCodePage
+    ghcVersion <- view $ actualCompilerVersionL.to getGhcVersion
+    if mcp && ghcVersion < $(mkVersion "7.10.3")
         then fixCodePage'
         -- GHC >=7.10.3 doesn't need this code page hack.
         else inner
@@ -345,13 +323,13 @@ fixCodePage inner = do
         let setInput = origCPI /= expected
             setOutput = origCPO /= expected
             fixInput
-                | setInput = Catch.bracket_
+                | setInput = bracket_
                     (liftIO $ do
                         setConsoleCP expected)
                     (liftIO $ setConsoleCP origCPI)
                 | otherwise = id
             fixOutput
-                | setInput = Catch.bracket_
+                | setOutput = bracket_
                     (liftIO $ do
                         setConsoleOutputCP expected)
                     (liftIO $ setConsoleOutputCP origCPO)
@@ -371,14 +349,13 @@ fixCodePage inner = do
         , " codepage to UTF-8 (65001) to ensure correct output from GHC"
         ]
 #else
-fixCodePage :: a -> a
 fixCodePage = id
 #endif
 
 -- | Query information about the build and print the result to stdout in YAML format.
-queryBuildInfo :: (StackM env m, HasEnvConfig env)
+queryBuildInfo :: HasEnvConfig env
                => [Text] -- ^ selectors
-               -> m ()
+               -> RIO env ()
 queryBuildInfo selectors0 =
         rawBuildInfo
     >>= select id selectors0
@@ -400,10 +377,10 @@ queryBuildInfo selectors0 =
             _ -> err $ "Cannot apply selector to " ++ show value
       where
         cont = select (front . (sel:)) sels
-        err msg = error $ msg ++ ": " ++ show (front [sel])
+        err msg = throwString $ msg ++ ": " ++ show (front [sel])
 
 -- | Get the raw build information object
-rawBuildInfo :: (StackM env m, HasEnvConfig env) => m Value
+rawBuildInfo :: HasEnvConfig env => RIO env Value
 rawBuildInfo = do
     (locals, _sourceMap) <- loadSourceMap NeedTargets defaultBuildOptsCLI
     return $ object

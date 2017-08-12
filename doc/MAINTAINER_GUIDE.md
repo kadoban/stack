@@ -2,71 +2,89 @@
 
 ## Next release:
 
-* Consider moving all the release scripts stuff to a separate repo, or make it
-  easy to run the release tools from a separate repo than the version of Stack
-  being released. This will make it much easier to adjust the release process as
-  we go without ending up with stack binaries build from different git commit
-  IDs.
+* Create release candidate process (maybe switch to GHC-style versioning)
+* Maybe drop 32-bit CentOS 6 bindists, since GHC 8.2.1 seems to have dropped them.
+* Replace non-static Linux bindists with static (but keep old links active so
+  links don't break and 'stack upgrade' in old versions still work)
 
 ## Pre-release steps
 
+* Check for any P0 and P1 issues.
 * Ensure `release` and `stable` branches merged to `master`
-* Ensure integration tests pass on a representative Windows, Mac OS X, and Linux (Linux
-  is handled by Jenkins automatically): `stack install --pedantic && stack test
-  --pedantic --flag stack:integration-tests` . The actual release script will
-  perform a more thorough test for every platform/variant prior to uploading, so
-  this is just a pre-check
-* Ensure `stack haddock` works (Travis CI now does this)
-* Stack builds with `stack-7.8.yaml` (Travis CI now does this)
-* stack can build the wai repo
-* Running `stack build` a second time on either stack or wai is a no-op
-* Build something that depends on `happy` (suggestion: `hlint`), since `happy`
-  has special logic for moving around the `dist` directory
+* Check compatibility with latest Stackage snapshots
+    * stack-*.yaml (where `*` is not `nightly`): bump to use latest LTS minor
+      version (be sure any extra-deps that exist only for custom flags have
+      versions matching the snapshot)
+    * Check for any redundant extra-deps
+    * Run `stack --stack-yaml=stack-*.yaml test --pedantic` (replace `*` with
+      the actual file)
+* Check compatibility with latest nightly stackage snapshot:
+    * Update `stack-nightly.yaml` with latest nightly and remove extra-deps (be
+      sure any extra-deps that exist only for custom flags have versions
+      matching the snapshot)
+    * Run `stack --stack-yaml=stack-nightly.yaml test --pedantic`
+* Check pvp-bounds compatibility with Stackage snapshots:
+    * Create an sdist using `stack sdist --pvp-bounds=both`
+    * Temporarily replace `stack.cabal` with the `stack.cabal` in that sdist
+    * Run `stack --stack-yaml=stack-*.yaml test --pedantic` for each
+      `stack-*.yaml` and adjust upper bounds in original `stack.cabal` until it
+      works with pvp-bounds.
+* Ensure integration tests pass on a Windows, macOS, and Linux (Linux
+  integration tests are run
+  by
+  [Gitlab](http://gitlab.fpcomplete.com/fpco-mirrors/stack/pipelines)):
+  `stack install --pedantic && stack test --pedantic --flag
+  stack:integration-tests`. The actual release script will perform a more
+  thorough test for every platform/variant prior to uploading, so this is just a
+  pre-check
 * In master branch:
     * stack.cabal: bump the version number to release (even third
       component)
-    * ChangeLog: rename the "unreleased changes" section to the new version
+    * ChangeLog: rename the "Unreleased changes" section to the new version
 * Cut a release candidate branch `rc/vX.Y.Z` from master
 * In master branch:
     * stack.cabal: bump version number to unstable (odd third component)
     * Changelog: add new "unreleased changes" section
-    * stack.yaml: bump to use latest LTS version, and check whether extra-deps
-      still needed
 * In RC branch:
-    * Update the ChangeLog
-      ([this comparison](https://github.com/commercialhaskell/stack/compare/stable...master)
-      is handy):
-        * Check for any important changes that missed getting an entry in Changelog
+    * Update the ChangeLog:
+        * Check for any important changes that missed getting an entry in
+          Changelog (`git log origin/stable...HEAD`)
         * Check for any entries that snuck into the previous version's changes
-          due to merges
+          due to merges (`git diff origin/stable HEAD ChangeLog.md`)
     * Review documentation for any changes that need to be made
         * Search for old Stack version, unstable stack version, and the next
           "obvious" version in sequence (if doing a non-obvious jump), and
           `UNRELEASED` and replace with new version
         * Look for any links to "latest" documentation, replace with version tag
         * Ensure all documentation pages listed in `mkdocs.yaml`
-    * Update the ISSUE_TEMPLATE.md to point at the new version.
-    * Check that any new Linux distribution versions added to
-      `etc/scripts/release.hs` and `etc/scripts/vagrant-releases.sh`
-        * [Ubuntu](https://wiki.ubuntu.com/Releases)
-        * [Debian](https://www.debian.org/releases/) (keep at least latest two)
-        * [CentOS](https://wiki.centos.org/Download)
-        * [Fedora](https://fedoraproject.org/wiki/Releases)
+    * Update `.github/ISSUE_TEMPLATE.md` to point at the new version.
     * Check for new [FreeBSD release](https://www.freebsd.org/releases/).
     * Check that no new entries need to be added to
       [releases.yaml](https://github.com/fpco/stackage-content/blob/master/stack/releases.yaml),
       [install_and_upgrade.md](https://github.com/commercialhaskell/stack/blob/master/doc/install_and_upgrade.md),
       and
       `README.md`
-    * Remove unsupported/obsolete distribution versions from
-      [install_and_upgrade.md](https://github.com/commercialhaskell/stack/blob/master/doc/install_and_upgrade.md),
-      and perhaps from the release process.
+    * Remove unsupported/obsolete distribution versions from the release process.
+        * [Ubuntu](https://wiki.ubuntu.com/Releases)
+            * 14.04 EOL 2019-APR
+            * 16.04 EOL 2021-APR
+        * [CentOS](https://wiki.centos.org/Download) 
+            * 6 EOL 2020-NOV-30
+            * 7 EOL 2024-JUN-30
 
 ## Release process
 
 See
 [stack-release-script's README](https://github.com/commercialhaskell/stack/blob/master/etc/scripts/README.md#prerequisites)
 for requirements to perform the release, and more details about the tool.
+
+A note about the `etc/scripts/*-releases.sh` scripts: if you run them from a
+different working tree than the scripts themselves (e.g. if you have `stack1`
+and `stack2` trees, and run `cd stack1; ../stack2/etc/scripts/vagrant-release.sh`)
+the scripts and Vagrantfiles from the
+tree containing the script will be used to build the stack code in the current
+directory. That allows you to iterate on the release process while building a
+consistent and clean stack version.
 
 * Create a
   [new draft Github release](https://github.com/commercialhaskell/stack/releases/new)
@@ -84,7 +102,7 @@ for requirements to perform the release, and more details about the tool.
 * On a machine with Vagrant installed:
     * Run `etc/scripts/vagrant-releases.sh`
 
-* On Mac OS X:
+* On macOS:
     * Run `etc/scripts/osx-release.sh`
 
 * On Windows:
@@ -99,43 +117,30 @@ for requirements to perform the release, and more details about the tool.
 * Build sdist using `stack sdist . --pvp-bounds=both`, and upload it to the
   Github release with a name like `stack-X.Y.Z-sdist-0.tar.gz`.
 
-* Publish Github release. Use e.g. `git shortlog -s v1.1.2..rc/v1.2.0|sed
-  's/^[0-9 ]*/* /'|sort -f` to get the list of contributors.
+* Publish Github release. Use e.g. `git shortlog -s release..HEAD|sed $'s/^[0-9 \t]*/* /'|sort -f`
+  to get the list of contributors.
 
 * Upload package to Hackage: `stack upload . --pvp-bounds=both`
 
-* On a machine with Vagrant installed:
-    * Run `etc/scripts/vagrant-distros.sh`
+* Push signed Git tag, matching Github release tag name, e.g.: `git tag -d vX.Y.Z; git tag -u 0x575159689BEFB442 -m vX.Y.Z vX.Y.Z && git push -f origin vX.Y.Z`
 
-* Edit
-  [stack-setup-2.yaml](https://github.com/fpco/stackage-content/blob/master/stack/stack-setup-2.yaml),
-  and add the new linux64 stack bindist
-
-* (SKIP) Submit a PR for the
-  [haskell-stack Homebrew formula](https://github.com/Homebrew/homebrew-core/blob/master/Formula/haskell-stack.rb)
-      * Ensure that the formula use the sdist uploaded to the Github release
-      * Be sure to update the SHA sum
-      * The commit message should just be `haskell-stack <VERSION>`
-
-* (SKIP) [Flag the Arch Linux package as out-of-date](https://www.archlinux.org/packages/community/x86_64/stack/flag/)
-
-* Push signed Git tag, matching Github release tag name, e.g.: `git tag -d vX.Y.Z && git tag -u
-  0x575159689BEFB442 vX.Y.Z && git push -f origin vX.Y.Z`
-
-* Reset the `release` branch to the released commit, e.g.: `git checkout release
-  && git merge --ff-only vX.Y.Z && git push origin release`
+* Reset the `release` branch to the released commit, e.g.: `git checkout release && git merge --ff-only vX.Y.Z && git push origin release`
 
 * Update the `stable` branch similarly
 
-* Delete the RC branch (locally and on origin)
+* Delete the RC branch and any RC tags (locally and on origin)
 
 * Activate version for new release tag on
-  [readthedocs.org](https://readthedocs.org/projects/stack/versions/), and
+  [readthedocs.org](https://readthedocs.org/dashboard/stack/versions/), and
   ensure that stable documentation has updated
 
-* Upload haddocks to Hackage: `etc/scripts/upload-haddocks.sh`
-
 * Merge any changes made in the RC/release/stable branches to master.
+
+* On a machine with Vagrant installed:
+    * Make sure you are on the same commit as when `vagrant-release.sh` was run.
+    * Run `etc/scripts/vagrant-distros.sh`
+
+* Upload haddocks to Hackage: `etc/scripts/upload-haddocks.sh` (if they weren't auto-built)
 
 * Announce to haskell-cafe@haskell.org, haskell-stack@googlegroups.com,
   commercialhaskell@googlegroups.com mailing lists
@@ -218,7 +223,7 @@ set up.
 
 ## Setting up an ARM VM for releases
 
-These instructions assume the host system is running OS X. Some steps will vary
+These instructions assume the host system is running macOS. Some steps will vary
 with a different host OS.
 
 ### Install qemu on host
@@ -248,20 +253,27 @@ line.
     qemu-img create -f raw armdisk.raw 15G && \
     qemu-system-arm -M vexpress-a9 -cpu cortex-a9 -kernel vmlinuz -initrd initrd.gz -sd armdisk.raw -append "root=/dev/mmcblk0p2" -m 1024M -redir tcp:2223::22 -dtb vexpress-v2p-ca9.dtb -append "console=ttyAMA0,115200" -serial stdio
 
-Now the Debian installer will run.  Add at least 1 GB SWAP during installation.
+Now the Debian installer will run. Don't use LVM for partitioning (it won't
+boot), and add at least 4 GB swap during installation.
 
 ### Get boot files after install
 
+Adjust the disk number `/dev/disk3` below to match the output from `hdiutil attach`.
+
     hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount armdisk.raw && \
-    mkdir -p /Volumes/armdeb && \
-    fuse-ext2 /dev/disk2s1 /Volumes/armdeb/ && \
-    cp /Volumes/armdeb/vmlinuz-3.16.0-4-armmp . && \
-    cp /Volumes/armdeb/initrd.img-3.16.0-4-armmp . && \
-    hdiutil detach /dev/disk2
+    sudo mkdir -p /Volumes/debarm && \
+    sudo fuse-ext2 /dev/disk3s1 /Volumes/debarm/ && \
+    sleep 5 && \
+    cp /Volumes/debarm/vmlinuz-3.16.0-4-armmp . && \
+    cp /Volumes/debarm/initrd.img-3.16.0-4-armmp . && \
+    sudo umount /Volumes/debarm && \
+    hdiutil detach /dev/disk3
 
 ### Boot VM
 
-    qemu-system-arm -M vexpress-a9 -cpu cortex-a9 -kernel vmlinuz-3.16.0-4-armmp -initrd initrd.img-3.16.0-4-armmp -sd armdisk.raw -m 1024M -dtb vexpress-v2p-ca9.dtb -append "root=/dev/mmcblk0p2 console=ttyAMA0,115200" -serial stdio -redir tcp:2223::22
+Adjust `/dev/mmcblk0p3` below to the root partition you created during installation.
+
+    qemu-system-arm -M vexpress-a9 -cpu cortex-a9 -kernel vmlinuz-3.16.0-4-armmp -initrd initrd.img-3.16.0-4-armmp -sd armdisk.raw -m 1024M -dtb vexpress-v2p-ca9.dtb -append "root=/dev/mmcblk0p3 console=ttyAMA0,115200" -serial stdio -redir tcp:2223::22
 
 ### Setup rest of system
 
@@ -275,42 +287,51 @@ during Debian installation):
 Now you can SSH to the VM using `ssh -p 2223 <<<USERNAME>>>@localhost` and use `sudo` in
 the shell.
 
-### Install GHC/clang
+### Install build tools and dependencies packages
+
+    sudo apt-get install -y g++ gcc libc6-dev libffi-dev libgmp-dev make xz-utils zlib1g-dev git gnupg
+
+### Install clang+llvm
 
 NOTE: the Debian jessie `llvm` packge does not work (executables built with it
 just exit with "schedule: re-entered unsafely.").
 
-    sudo apt-get install -y g++ gcc libc6-dev libffi-dev libgmp-dev make xz-utils zlib1g-dev git gnupg && \
+The version of LLVM needed depends on the version of GHC you need.
+
+#### GHC 8.0.2 (the standard for building Stack)
+
+    wget http://llvm.org/releases/3.7.1/clang+llvm-3.7.1-armv7a-linux-gnueabihf.tar.xz && \
+    sudo tar xvf clang+llvm-3.7.1-armv7a-linux-gnueabihf.tar.xz -C /opt
+
+Run this now and add it to the `.profile`:
+
+    export PATH="$HOME/.local/bin:/opt/clang+llvm-3.7.1-armv7a-linux-gnueabihf/bin:$PATH"
+
+#### GHC 7.10.3
+
     wget http://llvm.org/releases/3.5.2/clang+llvm-3.5.2-armv7a-linux-gnueabihf.tar.xz && \
-    sudo tar xvf clang+llvm-3.5.2-armv7a-linux-gnueabihf.tar.xz -C /opt && \
-    http://downloads.haskell.org/~ghc/7.10.3/ghc-7.10.3-armv7-deb8-linux.tar.xz
+    sudo tar xvf clang+llvm-3.5.2-armv7a-linux-gnueabihf.tar.xz -C /opt
+
+Run this now and add it to the `.profile`:
+
+    export PATH="$HOME/.local/bin:/opt/clang+llvm-3.5.2-armv7a-linux-gnueabihf/bin:$PATH"
+
+### Install Stack
+
+#### Binary
+
+Get an [existing `stack` binary](https://github.com/commercialhaskell/stack/releases)
+and put it in `~/.local/bin`.
+
+#### From source (using cabal-install):
+
+    wget http://downloads.haskell.org/~ghc/7.10.3/ghc-7.10.3-armv7-deb8-linux.tar.xz && \
     tar xvf ghc-7.10.3-armv7-deb8-linux.tar.xz && \
     cd ghc-7.10.3 && \
     ./configure --prefix=/opt/ghc-7.10.3 && \
     sudo make install && \
     cd ..
-
-Run this now and add it to the `.profile`:
-
-    export PATH="$HOME/.local/bin:/opt/ghc-7.10.3/bin:/opt/clang+llvm-3.5.2-armv7a-linux-gnueabihf/bin:$PATH"
-
-Note: to install GHC 8.0.1/clang 3.7.1 instead, use:
-
-    wget http://llvm.org/releases/3.7.1/clang+llvm-3.7.1-armv7a-linux-gnueabihf.tar.xz && \
-    sudo tar xvf clang+llvm-3.7.1-armv7a-linux-gnueabihf.tar.xz -C /opt && \
-    wget http://downloads.haskell.org/~ghc/8.0.1/ghc-8.0.1-armv7-deb8-linux.tar.xz && \
-    tar xvf ghc-8.0.1-armv7-deb8-linux.tar.xz && \
-    cd ghc-8.0.1 && \
-    ./configure --prefix=/opt/ghc-8.0.1 && \
-    sudo make install && \
-    cd ..
-
-### Install Stack
-
-Get an [existing `stack` binary](github.com/commercialhaskell/stack/releases)
-and put it in `~/.local/bin`. If that is not possible, bootstrap Stack using
-this process:
-
+    export PATH="/opt/ghc-7.10.3/bin:$PATH"
     wget https://www.haskell.org/cabal/release/cabal-install-1.24.0.0/cabal-install-1.24.0.0.tar.gz &&&&& \
     tar xvf cabal-install-1.24.0.0.tar.gz && \
     cd cabal-install-1.24.0.0 && \
@@ -326,6 +347,10 @@ Edit `~/.cabal/config`, and set `executable-stripping: False` and
     cd stack-* && \
     cabal install && \
     mv ~/.cabal/bin/stack ~/.local/bin
+
+### Import GPG private key
+
+Import the `dev@fpcomplete.com` (0x575159689BEFB442) GPG secret key
 
 ### Resources
 
@@ -356,8 +381,11 @@ Edit `~/.cabal/config`, and set `executable-stripping: False` and
     [stack-setup-2.yaml](https://github.com/fpco/stackage-content/blob/master/stack/stack-setup-2.yaml)
     for the ones we used in the last GHC release).
 
-    In the case of OS X, repackage the `.xz` bindist as a `.bz2`, since OS X does
+    In the case of macOS, repackage the `.xz` bindist as a `.bz2`, since macOS does
     not include `xz` by default or provide an easy way to install it.
+
+    The script at `etc/scripts/mirror-ghc-bindists-to-github.sh` will help with
+    this. See the comments within the script.
 
   * Build any additional required bindists (see below for instructions)
 
@@ -375,9 +403,10 @@ location.
 
 For GHC >= 7.10.2, set the `GHC_VERSION` environment variable to the version to build:
 
-    * `export GHC_VERSION=8.0.1`
-    * `export GHC_VERSION=7.10.3a`
-    * `export GHC_VERSION=7.10.2`
+  * `export GHC_VERSION=8.0.2`
+  * `export GHC_VERSION=8.0.1`
+  * `export GHC_VERSION=7.10.3a`
+  * `export GHC_VERSION=7.10.2`
 
 then, run (from [here](https://ghc.haskell.org/trac/ghc/wiki/Newcomers)):
 

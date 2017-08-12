@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -17,34 +18,24 @@ module Network.HTTP.Download
     , httpJSON
     , parseRequest
     , parseUrlThrow
+    , setGithubHeaders
     ) where
 
-import           Control.Exception           (Exception)
-import           Control.Exception.Safe      (handleIO)
-import           Control.Monad               (void)
-import           Control.Monad.Catch         (throwM)
-import           Control.Monad.IO.Class      (MonadIO, liftIO)
-import           Control.Monad.Logger        (MonadLogger, logDebug)
+import           Stack.Prelude
 import qualified Data.ByteString.Lazy        as L
-import           Data.Conduit                (runConduit, runConduitRes, (.|), yield)
+import           Data.Conduit                (yield)
 import           Data.Conduit.Binary         (sourceHandle)
 import qualified Data.Conduit.Binary         as CB
-import           Data.Foldable               (forM_)
-import           Data.Monoid                 ((<>))
 import           Data.Text.Encoding.Error    (lenientDecode)
 import           Data.Text.Encoding          (decodeUtf8With)
-import           Data.Typeable               (Typeable)
 import           Network.HTTP.Client         (Request, Response, path, checkResponse, parseUrlThrow, parseRequest)
-import           Network.HTTP.Client.Conduit (
-                                              requestHeaders)
+import           Network.HTTP.Client.Conduit (requestHeaders)
 import           Network.HTTP.Download.Verified
-import           Network.HTTP.Simple         (httpJSON, withResponse, getResponseBody, getResponseHeaders, getResponseStatusCode)
-import           Path                        (Abs, File, Path, toFilePath)
+import           Network.HTTP.Simple         (httpJSON, withResponse, getResponseBody, getResponseHeaders, getResponseStatusCode,
+                                              setRequestHeader)
 import           System.Directory            (createDirectoryIfMissing,
                                               removeFile)
 import           System.FilePath             (takeDirectory, (<.>))
-import           System.IO                   (IOMode (ReadMode),
-                                              withBinaryFile)
 
 -- | Download the given URL to the given location. If the file already exists,
 -- no download is performed. Otherwise, creates the parent directory, downloads
@@ -113,3 +104,8 @@ redownload req0 dest = do
 data DownloadException = RedownloadFailed Request (Path Abs File) (Response ())
     deriving (Show, Typeable)
 instance Exception DownloadException
+
+-- | Set the user-agent request header
+setGithubHeaders :: Request -> Request
+setGithubHeaders = setRequestHeader "User-Agent" ["The Haskell Stack"]
+                 . setRequestHeader "Accept" ["application/vnd.github.v3+json"]

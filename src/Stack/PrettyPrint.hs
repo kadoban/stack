@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -15,7 +16,7 @@ module Stack.PrettyPrint
       -- | These are preferred to colors directly, so that we can
       -- encourage consistency of color meanings.
     , errorRed, goodGreen, shellMagenta
-    , displayTargetPkgId, displayCurrentPkgId, displayErrorPkgId
+    , displayTargetPkgId, displayCurrentPkgId, displayCurrentPkgName, displayErrorPkgId
     , displayMilliseconds
       -- * Formatting utils
     , bulletedList
@@ -29,28 +30,24 @@ module Stack.PrettyPrint
     , enclose, squotes, dquotes, parens, angles, braces, brackets
     ) where
 
-import           Control.Exception.Lifted
-import           Control.Monad.Logger
-import           Control.Monad.Reader
+import           Stack.Prelude
 import           Data.List (intersperse)
-import           Data.Monoid
-import           Data.String (fromString)
 import qualified Data.Text as T
 import           Language.Haskell.TH
-import           Path
-import           Stack.Types.Internal
+import           Stack.Types.Config
 import           Stack.Types.Package
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
+import           Stack.Types.Runner
 import           Stack.Types.Version
 import qualified System.Clock as Clock
 import           Text.PrettyPrint.Leijen.Extended
 
 displayWithColor
-    :: (HasLogOptions env, MonadReader env m, Display a, HasAnsiAnn (Ann a))
+    :: (HasRunner env, MonadReader env m, Display a, HasAnsiAnn (Ann a))
     => a -> m T.Text
 displayWithColor x = do
-    useAnsi <- asks (logUseColor . getLogOptions)
+    useAnsi <- liftM logUseColor $ view logOptionsL
     return $ if useAnsi then displayAnsi x else displayPlain x
 
 -- TODO: switch to using implicit callstacks once 7.8 support is dropped
@@ -88,7 +85,7 @@ debugBracket = do
                 output $ "Finished with exception in" <+> displayMilliseconds diff <> ":" <+>
                     msg <> line <>
                     "Exception thrown: " <> fromString (show ex)
-                throw (ex :: SomeException)
+                throwIO (ex :: SomeException)
             end <- liftIO $ Clock.getTime Clock.Monotonic
             let diff = Clock.diffTimeSpec start end
             output $ "Finished in" <+> displayMilliseconds diff <> ":" <+> msg
@@ -112,6 +109,9 @@ displayTargetPkgId = cyan . display
 
 displayCurrentPkgId :: PackageIdentifier -> AnsiDoc
 displayCurrentPkgId = yellow . display
+
+displayCurrentPkgName :: PackageName -> AnsiDoc
+displayCurrentPkgName = yellow . display
 
 displayErrorPkgId :: PackageIdentifier -> AnsiDoc
 displayErrorPkgId = errorRed . display

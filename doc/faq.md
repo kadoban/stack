@@ -4,6 +4,34 @@ So that this doesn't become repetitive: for the reasons behind the answers
 below, see the [Architecture](architecture.md) page. The goal of the answers
 here is to be as helpful and concise as possible.
 
+## What version of GHC is used when I run something like `stack ghci`?
+
+The version of GHC, as well as which packages can be installed, are
+specified by the _resolver_. This may be something like `lts-8.12`,
+which is from the
+[Long Term Support (LTS) Haskell](https://github.com/fpco/lts-haskell/)
+project. The [user guide](GUIDE.md) discusses resolvers in more
+detail.
+
+Which resolver is used is determined by finding the relevant
+`stack.yaml` configuration file for the directory you're running the
+command from. This essentially works by:
+
+1. Check for a `STACK_YAML` environment variable or the `--stack-yaml`
+   command line argument
+2. If none present, check for a `stack.yaml` file in the current
+   directory or any parents
+3. If no `stack.yaml` was found, use the _implicit global_
+
+The implicit global is a shared project used whenever you're outside
+of another project. It's a sort of "mutable shared state" that you
+should be aware of when working with Stack. The most recent request
+when working with the implicit global is how to move to a more recent
+LTS snapshot. You can do this by running the following from outside of
+a project:
+
+    stack config set resolver lts
+
 ## Where is stack installed and will it interfere with `ghc` (etc) I already have installed?
 
 Stack itself is installed in normal system locations based on the mechanism you
@@ -191,9 +219,8 @@ detailed discussion of stack's behavior when `system-ghc` is enabled.
 
 ## How do I upgrade to GHC 7.10.2 with stack?
 
-If you already have a prior version of GHC use `stack --resolver ghc-7.10 setup
---reinstall`. If you don't have any GHC installed, you can skip the
-`--reinstall`.
+If you already have a prior version of GHC use `stack --resolver ghc-7.10 setup --reinstall`.
+If you don't have any GHC installed, you can skip the `--reinstall`.
 
 ## How do I get extra build tools?
 
@@ -201,8 +228,8 @@ stack will automatically install build tools required by your packages or their
 dependencies, in particular alex and happy.
 
 __NOTE__: This works when using lts or nightly resolvers, not with ghc or
-custom resolvers. You can manually install build tools by running, e.g., `stack
-build alex happy`.
+custom resolvers. You can manually install build tools by running, e.g.,
+`stack build alex happy`.
 
 ## How does stack choose which snapshot to use when creating a new config file?
 
@@ -402,7 +429,7 @@ collect2: error: ld returned 1 exit status
 The issue may be related to the use of hardening flags in some cases,
 specifically those related to producing position independent executables (PIE).
 This is tracked upstream in the [following
-ticket](https://ghc.haskell.org/trac/ghc/ticket/9007). Some distributions add
+ticket](https://ghc.haskell.org/trac/ghc/ticket/12759). Some distributions add
 such hardening flags by default which may be the cause of some instances of the
 problem. Therefore, a possible workaround might be to turn off PIE related
 flags.
@@ -418,8 +445,8 @@ If you manage to work around this in other distributions, please include instruc
 ## Where does the output from `--ghc-options=-ddump-splices` (and other `-ddump*` options) go?
 
 These are written to `*.dump-*` files inside the package's `.stack-work`
-directory. Specifically, they will be available at `PKG-DIR/$(stack path
---dist-dir)/build/SOURCE-PATH`, where `SOURCE-PATH` is the path to the source
+directory. Specifically, they will be available at
+`PKG-DIR/$(stack path --dist-dir)/build/SOURCE-PATH`, where `SOURCE-PATH` is the path to the source
 file, relative to the location of the `*.cabal` file. When building named
 components such as test-suites, `SOURCE-PATH` will also include
 `COMPONENT/COMPONENT-tmp`, where `COMPONENT` is the name of the component.
@@ -474,7 +501,7 @@ system libraries.
 
 ## How can I make `stack` aware of my custom SSL certificates?
 
-### OS X
+### macOS
 
 In principle, you can use the following command to add a certificate to your system certificate keychain:
 
@@ -488,3 +515,14 @@ information.
 
 Use the `SYSTEM_CERTIFICATE_PATH` environment variable to point at the directory
 where you keep your SSL certificates.
+
+## How do I get `verbose` output from GHC when I build with cabal?
+
+Unfortunately `stack build` does not have an obvious equivalent to `cabal build -vN` which shows verbose output from GHC when building. The easiest workaround is to add `ghc-options: -vN` to the .cabal file or pass it via `stack build --ghc-options="-v"`.
+
+## Does Stack support the Hpack specification?
+
+Yes:
+
+* If a package directory contains an Hpack `package.yaml` file, then Stack will use it to generate a `.cabal` file when building the package.
+* You can run `stack init` to initialize a `stack.yaml` file regardless of whether your packages are declared with `.cabal` files or with Hpack `package.yaml` files.

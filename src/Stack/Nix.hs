@@ -1,4 +1,6 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -11,22 +13,11 @@ module Stack.Nix
   ,nixHelpOptName
   ) where
 
-import           Control.Arrow ((***))
-import           Control.Exception (Exception,throw)
-import           Control.Monad hiding (mapM)
-import           Control.Monad.IO.Class (liftIO)
-import           Control.Monad.Logger (logDebug)
-import           Control.Monad.Reader (asks)
-import           Data.Maybe
-import           Data.Monoid
+import           Stack.Prelude
 import qualified Data.Text as T
-import           Data.Traversable
-import           Data.Typeable (Typeable)
 import           Data.Version (showVersion)
-import           Path
 import           Path.IO
 import qualified Paths_stack as Meta
-import           Prelude hiding (mapM) -- Fix redundant import warnings
 import           Stack.Config (getInNixShell, getInContainer)
 import           Stack.Config.Nix (nixCompiler)
 import           Stack.Constants (platformVariantEnvVar,inNixShellEnvVar,inContainerEnvVar)
@@ -34,9 +25,8 @@ import           Stack.Exec (exec)
 import           Stack.Types.Config
 import           Stack.Types.Docker
 import           Stack.Types.Nix
+import           Stack.Types.Runner
 import           Stack.Types.Compiler
-import           Stack.Types.Internal
-import           Stack.Types.StackT
 import           System.Environment (getArgs,getExecutablePath,lookupEnv)
 import qualified System.FilePath  as F
 import           System.Process.Read (getEnvOverride)
@@ -44,16 +34,16 @@ import           System.Process.Read (getEnvOverride)
 -- | If Nix is enabled, re-runs the currently running OS command in a Nix container.
 -- Otherwise, runs the inner action.
 reexecWithOptionalShell
-    :: (StackM env m, HasConfig env)
+    :: HasConfig env
     => Maybe (Path Abs Dir)
-    -> IO CompilerVersion
+    -> IO (CompilerVersion 'CVWanted)
     -> IO ()
-    -> m ()
+    -> RIO env ()
 reexecWithOptionalShell mprojectRoot getCompilerVersion inner =
-  do config <- asks getConfig
+  do config <- view configL
      inShell <- getInNixShell
      inContainer <- getInContainer
-     isReExec <- asks getReExec
+     isReExec <- view reExecL
      let getCmdArgs = do
            origArgs <- liftIO getArgs
            let args | inContainer = origArgs  -- internal-re-exec version already passed
@@ -68,13 +58,13 @@ reexecWithOptionalShell mprojectRoot getCompilerVersion inner =
 
 
 runShellAndExit
-    :: (StackM env m, HasConfig env)
+    :: HasConfig env
     => Maybe (Path Abs Dir)
-    -> IO CompilerVersion
-    -> m (String, [String])
-    -> m ()
+    -> IO (CompilerVersion 'CVWanted)
+    -> RIO env (String, [String])
+    -> RIO env ()
 runShellAndExit mprojectRoot getCompilerVersion getCmdArgs = do
-     config <- asks getConfig
+     config <- view configL
      envOverride <- getEnvOverride (configPlatform config)
      (cmnd,args) <- fmap (escape *** map escape) getCmdArgs
      mshellFile <-
@@ -82,9 +72,9 @@ runShellAndExit mprojectRoot getCompilerVersion getCmdArgs = do
          nixInitFile (configNix config)
      compilerVersion <- liftIO getCompilerVersion
      inContainer <- getInContainer
+     ghc <- either throwIO return $ nixCompiler compilerVersion
      let pkgsInConfig = nixPackages (configNix config)
-         ghc = nixCompiler compilerVersion
-         pkgs = pkgsInConfig ++ [ghc]
+         pkgs = pkgsInConfig ++ [ghc, "git"]
          pkgsStr = "[" <> T.intercalate " " pkgs <> "]"
          pureShell = nixPureShell (configNix config)
          addGCRoots = nixAddGCRoots (configNix config)
@@ -140,7 +130,7 @@ escape str = "'" ++ foldr (\c -> if c == '\'' then
 
 -- | Fail with friendly error if project root not set.
 fromMaybeProjectRoot :: Maybe (Path Abs Dir) -> Path Abs Dir
-fromMaybeProjectRoot = fromMaybe (throw CannotDetermineProjectRoot)
+fromMaybeProjectRoot = fromMaybe (impureThrow CannotDetermineProjectRoot)
 
 -- | Command-line argument for "nix"
 nixCmdName :: String

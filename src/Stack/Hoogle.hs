@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -7,26 +8,18 @@ module Stack.Hoogle
     ( hoogleCmd
     ) where
 
-import           Control.Exception
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Reader
+import           Stack.Prelude
 import qualified Data.ByteString.Char8 as S8
 import           Data.List (find)
-import qualified Data.Map.Strict as Map
-import           Data.Monoid
 import qualified Data.Set as Set
 import           Lens.Micro
-import           Path
 import           Path.IO
 import qualified Stack.Build
 import           Stack.Fetch
 import           Stack.Runners
 import           Stack.Types.Config
-import           Stack.Types.Internal
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT
 import           Stack.Types.Version
 import           System.Exit
 import           System.Process.Read (resetExeCache, tryProcessStdout)
@@ -36,7 +29,7 @@ import           System.Process.Run
 hoogleCmd :: ([String],Bool,Bool) -> GlobalOpts -> IO ()
 hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
   where
-    pathToHaddocks :: StackT EnvConfig IO ()
+    pathToHaddocks :: RIO EnvConfig ()
     pathToHaddocks = do
         hoogleIsInPath <- checkHoogleInPath
         if hoogleIsInPath
@@ -52,7 +45,7 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
                         $logError
                             "Hoogle isn't installed or is too old. Not installing it due to --no-setup."
                         bail
-    haddocksToDb :: StackT EnvConfig IO ()
+    haddocksToDb :: RIO EnvConfig ()
     haddocksToDb = do
         databaseExists <- checkDatabaseExists
         if databaseExists && not rebuild
@@ -72,18 +65,18 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
                          $logError
                              "No Hoogle database. Not building one due to --no-setup"
                          bail
-    generateDb :: StackT EnvConfig IO ()
+    generateDb :: RIO EnvConfig ()
     generateDb = do
         do dir <- hoogleRoot
            createDirIfMissing True dir
            runHoogle ["generate", "--local"]
-    buildHaddocks :: StackT EnvConfig IO ()
+    buildHaddocks :: RIO EnvConfig ()
     buildHaddocks =
         liftIO
             (catch
                  (withBuildConfigAndLock
                       (set
-                           (globalOptsBuildOptsMonoid . buildOptsMonoidHaddock)
+                           (globalOptsBuildOptsMonoidL . buildOptsMonoidHaddockL)
                            (Just True)
                            go)
                       (\lk ->
@@ -93,7 +86,7 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
                                 defaultBuildOptsCLI))
                  (\(_ :: ExitCode) ->
                        return ()))
-    installHoogle :: StackT EnvConfig IO ()
+    installHoogle :: RIO EnvConfig ()
     installHoogle = do
         let hooglePackageName = $(mkPackageName "hoogle")
             hoogleMinVersion = $(mkVersion "5.0")
@@ -102,12 +95,23 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
         hooglePackageIdentifier <-
             do (_,_,resolved) <-
                    resolvePackagesAllowMissing
+
+                       -- FIXME this Nothing means "do not follow any
+                       -- specific snapshot", which matches old
+                       -- behavior. However, since introducing the
+                       -- logic to pin a name to a package in a
+                       -- snapshot, we may arguably want to ensure
+                       -- that we're grabbing the version of Hoogle
+                       -- present in the snapshot currently being
+                       -- used.
+                       Nothing
+
                        mempty
                        (Set.fromList [hooglePackageName])
                return
                    (case find
                              ((== hooglePackageName) . packageIdentifierName)
-                             (Map.keys resolved) of
+                             (map rpIdent resolved) of
                         Just ident@(PackageIdentifier _ ver)
                           | ver >= hoogleMinVersion -> Right ident
                         _ -> Left hoogleMinIdent)
@@ -122,7 +126,7 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
                      ". Found acceptable " <>
                      packageIdentifierText ident <>
                      " in your index, installing it.")
-        config <- asks getConfig
+        config <- view configL
         menv <- liftIO $ configEnvOverride config envSettings
         liftIO
             (catch
@@ -143,9 +147,9 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
                        case e of
                            ExitSuccess -> resetExeCache menv
                            _ -> throwIO e))
-    runHoogle :: [String] -> StackT EnvConfig IO ()
+    runHoogle :: [String] -> RIO EnvConfig ()
     runHoogle hoogleArgs = do
-        config <- asks getConfig
+        config <- view configL
         menv <- liftIO $ configEnvOverride config envSettings
         dbpath <- hoogleDatabasePath
         let databaseArg = ["--database=" ++ toFilePath dbpath]
@@ -157,17 +161,17 @@ hoogleCmd (args,setup,rebuild) go = withBuildConfig go pathToHaddocks
              , cmdCommandLineArguments = hoogleArgs ++ databaseArg
              }
             Nothing
-    bail :: StackT EnvConfig IO ()
+    bail :: RIO EnvConfig ()
     bail = liftIO (exitWith (ExitFailure (-1)))
     checkDatabaseExists = do
         path <- hoogleDatabasePath
         liftIO (doesFileExist path)
     checkHoogleInPath = do
-        config <- asks getConfig
+        config <- view configL
         menv <- liftIO $ configEnvOverride config envSettings
         result <- tryProcessStdout Nothing menv "hoogle" ["--numeric-version"]
-        case fmap (reads . S8.unpack) result of
-            Right [(ver :: Double,_)] -> return (ver >= 5.0)
+        case fmap (readMaybe . S8.unpack) result of
+            Right (Just (ver :: Double)) -> return (ver >= 5.0)
             _ -> return False
     envSettings =
         EnvSettings

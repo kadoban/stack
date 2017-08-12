@@ -1,25 +1,20 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecordWildCards  #-}
 {-# LANGUAGE TemplateHaskell  #-}
 module Stack.ConfigSpec where
 
-import Control.Applicative
-import Control.Exception
-import Control.Monad.Logger
 import Data.Aeson.Extended
-import Data.Either
-import Data.Maybe
-import Data.Monoid
 import Data.Yaml
 import Path
-import Path.IO
-import Prelude -- Fix redundant import warnings
+import Path.IO hiding (withSystemTempDir)
 import Stack.Config
+import Stack.Prelude
 import Stack.Types.Config
-import Stack.Types.StackT
+import Stack.Types.Runner
 import System.Directory
 import System.Environment
-import System.IO.Temp (withSystemTempDirectory)
+import System.IO (writeFile)
 import Test.Hspec
 
 sampleConfig :: String
@@ -80,21 +75,23 @@ spec = beforeAll setup $ do
         bracket_ setVar resetVar action
 
   describe "loadConfig" $ do
-    let loadConfig' = runStackT () logLevel True False ColorAuto False (loadConfig mempty Nothing Nothing)
-    let loadBuildConfigRest = runStackT () logLevel True False ColorAuto False
+    let loadConfig' inner =
+          withRunner logLevel True False ColorAuto False $ \runner -> do
+            lc <- runRIO runner $ loadConfig mempty Nothing SYLDefault
+            inner lc
     -- TODO(danburton): make sure parent dirs also don't have config file
-    it "works even if no config file exists" $ example $ do
-      _config <- loadConfig'
-      return ()
+    it "works even if no config file exists" $ example $
+      loadConfig' $ const $ return ()
 
     it "works with a blank config file" $ inTempDir $ do
       writeFile (toFilePath stackDotYaml) ""
       -- TODO(danburton): more specific test for exception
-      loadConfig' `shouldThrow` anyException
+      loadConfig' (const (return ())) `shouldThrow` anyException
 
     it "parses build config options" $ inTempDir $ do
-      writeFile (toFilePath stackDotYaml) buildOptsConfig
-      BuildOpts{..} <- configBuild . lcConfig <$> loadConfig'
+     writeFile (toFilePath stackDotYaml) buildOptsConfig
+     loadConfig' $ \lc -> do
+      let BuildOpts{..} = configBuild $ lcConfig lc
       boptsLibProfile `shouldBe` True
       boptsExeProfile `shouldBe` True
       boptsHaddock `shouldBe` True
@@ -120,19 +117,16 @@ spec = beforeAll setup $ do
       let childDir = "child"
       createDirectory childDir
       setCurrentDirectory childDir
-      LoadConfig{..} <- loadConfig'
-      bc@BuildConfig{..} <- loadBuildConfigRest
-                            (lcLoadBuildConfig Nothing)
-      bcRoot bc `shouldBe` parentDir
+      loadConfig' $ \LoadConfig{..} -> do
+        bc <- liftIO (lcLoadBuildConfig Nothing)
+        view projectRootL bc `shouldBe` parentDir
 
     it "respects the STACK_YAML env variable" $ inTempDir $ do
       withSystemTempDir "config-is-here" $ \dir -> do
         let stackYamlFp = toFilePath (dir </> stackDotYaml)
         writeFile stackYamlFp sampleConfig
-        withEnvVar "STACK_YAML" stackYamlFp $ do
-          LoadConfig{..} <- loadConfig'
-          BuildConfig{..} <- loadBuildConfigRest
-                                (lcLoadBuildConfig Nothing)
+        withEnvVar "STACK_YAML" stackYamlFp $ loadConfig' $ \LoadConfig{..} -> do
+          BuildConfig{..} <- lcLoadBuildConfig Nothing
           bcStackYaml `shouldBe` dir </> stackDotYaml
           parent bcStackYaml `shouldBe` dir
 
@@ -143,14 +137,15 @@ spec = beforeAll setup $ do
             yamlAbs = parentDir </> yamlRel
         createDirectoryIfMissing True $ toFilePath $ parent yamlAbs
         writeFile (toFilePath yamlAbs) "resolver: ghc-7.8"
-        withEnvVar "STACK_YAML" (toFilePath yamlRel) $ do
-            LoadConfig{..} <- loadConfig'
-            BuildConfig{..} <- loadBuildConfigRest
-                                (lcLoadBuildConfig Nothing)
+        withEnvVar "STACK_YAML" (toFilePath yamlRel) $ loadConfig' $ \LoadConfig{..} -> do
+            BuildConfig{..} <- lcLoadBuildConfig Nothing
             bcStackYaml `shouldBe` yamlAbs
 
   describe "defaultConfigYaml" $
     it "is parseable" $ \_ -> do
-        let parsed :: Either String (WithJSONWarnings ConfigMonoid)
-            parsed = decodeEither defaultConfigYaml
-        isRight parsed `shouldBe` True
+        curDir <- getCurrentDir
+        let parsed :: Either String (Either String (WithJSONWarnings ConfigMonoid))
+            parsed = parseEither (parseConfigMonoid curDir) <$> decodeEither defaultConfigYaml
+        case parsed of
+            Right (Right _) -> return () :: IO ()
+            _ -> fail "Failed to parse default config yaml"

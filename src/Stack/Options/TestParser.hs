@@ -1,11 +1,11 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stack.Options.TestParser where
 
-import           Data.Maybe
-import           Data.Monoid.Extra
 import           Options.Applicative
 import           Options.Applicative.Args
 import           Options.Applicative.Builder.Extra
 import           Stack.Options.Utils
+import           Stack.Prelude
 import           Stack.Types.Config
 
 -- | Parser for test arguments.
@@ -22,6 +22,7 @@ testOptsParser hide0 =
                 (optional
                     (argsOption
                         (long "test-arguments" <>
+                         long "ta" <>
                          metavar "TEST_ARGS" <>
                          help "Arguments passed in to the test suite program" <>
                          hide)))

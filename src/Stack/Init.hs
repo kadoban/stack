@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds       #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -8,69 +9,62 @@ module Stack.Init
     , InitOpts (..)
     ) where
 
-import           Control.Exception (assert)
-import           Control.Exception.Safe (catchAny)
-import           Control.Monad
-import           Control.Monad.Catch (throwM)
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Reader (asks)
-import qualified Data.ByteString.Builder as B
-import qualified Data.ByteString.Char8 as BC
-import qualified Data.ByteString.Lazy as L
-import qualified Data.Foldable as F
-import           Data.Function (on)
-import qualified Data.HashMap.Strict as HM
-import qualified Data.IntMap as IntMap
-import           Data.List                       ( intercalate, intersect
-                                                 , maximumBy)
-import           Data.List.NonEmpty (NonEmpty(..))
-import qualified Data.List.NonEmpty as NonEmpty
-import           Data.Map (Map)
-import qualified Data.Map as Map
-import           Data.Maybe
-import           Data.Monoid
-import qualified Data.Text as T
-import qualified Data.Yaml as Yaml
+import           Stack.Prelude
+import qualified Data.ByteString.Builder         as B
+import qualified Data.ByteString.Char8           as BC
+import qualified Data.ByteString.Lazy            as L
+import qualified Data.Foldable                   as F
+import qualified Data.HashMap.Strict             as HM
+import qualified Data.IntMap                     as IntMap
+import           Data.List                       (intercalate, intersect,
+                                                  maximumBy)
+import           Data.List.NonEmpty              (NonEmpty (..))
+import qualified Data.List.NonEmpty              as NonEmpty
+import qualified Data.Map                        as Map
+import qualified Data.Text                       as T
+import qualified Data.Yaml                       as Yaml
 import qualified Distribution.PackageDescription as C
-import qualified Distribution.Text as C
-import qualified Distribution.Version as C
+import qualified Distribution.Text               as C
+import qualified Distribution.Version            as C
 import           Path
+import           Path.Extra                      (toFilePathNoTrailingSep)
 import           Path.IO
-import qualified Paths_stack as Meta
+import qualified Paths_stack                     as Meta
 import           Stack.BuildPlan
 import           Stack.Config                    (getSnapshots,
                                                   makeConcreteResolver)
 import           Stack.Constants
+import           Stack.Snapshot                  (loadResolver)
 import           Stack.Solver
 import           Stack.Types.Build
 import           Stack.Types.BuildPlan
 import           Stack.Types.Config
 import           Stack.Types.FlagName
+import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
 import           Stack.Types.Resolver
-import           Stack.Types.StackT (StackM)
 import           Stack.Types.Version
-import qualified System.FilePath as FP
+import qualified System.FilePath                 as FP
 
 -- | Generate stack.yaml
 initProject
-    :: (StackM env m, HasConfig env, HasGHCVariant env)
+    :: (HasConfig env, HasGHCVariant env)
     => WhichSolverCmd
     -> Path Abs Dir
     -> InitOpts
     -> Maybe AbstractResolver
-    -> m ()
+    -> RIO env ()
 initProject whichCmd currDir initOpts mresolver = do
     let dest = currDir </> stackDotYaml
 
     reldest <- toFilePath `liftM` makeRelativeToCurrentDir dest
 
     exists <- doesFileExist dest
-    when (not (forceOverwrite initOpts) && exists) $ do
-        error ("Stack configuration file " <> reldest <>
-               " exists, use 'stack solver' to fix the existing config file or \
-               \'--force' to overwrite it.")
+    when (not (forceOverwrite initOpts) && exists) $
+        throwString
+            ("Error: Stack configuration file " <> reldest <>
+             " exists, use 'stack solver' to fix the existing config file or \
+             \'--force' to overwrite it.")
 
     dirs <- mapM (resolveDir' . T.unpack) (searchDirs initOpts)
     let noPkgMsg =  "In order to init, you should have an existing .cabal \
@@ -81,8 +75,13 @@ initProject whichCmd currDir initOpts mresolver = do
     cabalfps <- liftM concat $ mapM find dirs'
     (bundle, dupPkgs)  <- cabalPackagesCheck cabalfps noPkgMsg Nothing
 
-    (r, flags, extraDeps, rbundle) <- getDefaultResolver whichCmd dest initOpts
-                                                         mresolver bundle
+    (sd, flags, extraDeps, rbundle) <- getDefaultResolver whichCmd dest initOpts
+                                                          mresolver bundle
+
+    -- Kind of inefficient, since we've already parsed this value. But
+    -- better to reparse in this one case than carry the unneeded data
+    -- around everywhere in the codebase.
+    resolver <- parseCustomLocation (Just (parent dest)) (void (sdResolver sd))
 
     let ignored = Map.difference bundle rbundle
         dupPkgMsg
@@ -105,7 +104,6 @@ initProject whichCmd currDir initOpts mresolver = do
                 \satisfy all dependencies. Some external packages have been \
                 \added as dependencies.\n"
             | otherwise = ""
-
         makeUserMsg msgs =
             let msg = concat msgs
             in if msg /= "" then
@@ -119,9 +117,11 @@ initProject whichCmd currDir initOpts mresolver = do
         p = Project
             { projectUserMsg = if userMsg == "" then Nothing else Just userMsg
             , projectPackages = pkgs
-            , projectExtraDeps = extraDeps
-            , projectFlags = PackageFlags (removeSrcPkgDefaultFlags gpds flags)
-            , projectResolver = r
+            , projectDependencies = map
+                (\(n, v) -> PLIndex $ PackageIdentifierRevision (PackageIdentifier n v) CFILatest)
+                (Map.toList extraDeps)
+            , projectFlags = removeSrcPkgDefaultFlags gpds flags
+            , projectResolver = resolver
             , projectCompiler = Nothing
             , projectExtraPackageDBs = []
             }
@@ -130,20 +130,16 @@ initProject whichCmd currDir initOpts mresolver = do
             case stripDir currDir dir of
                 Nothing
                     | currDir == dir -> "."
-                    | otherwise -> assert False $ toFilePath dir
-                Just rel -> toFilePath rel
+                    | otherwise -> assert False $ toFilePathNoTrailingSep dir
+                Just rel -> toFilePathNoTrailingSep rel
 
         makeRel = fmap toFilePath . makeRelativeToCurrentDir
 
         pkgs = map toPkg $ Map.elems (fmap (parent . fst) rbundle)
-        toPkg dir = PackageEntry
-            { peExtraDepMaybe = Nothing
-            , peLocation = PLFilePath $ makeRelDir dir
-            , peSubdirs = []
-            }
+        toPkg dir = PLFilePath $ makeRelDir dir
         indent t = T.unlines $ fmap ("    " <>) (T.lines t)
 
-    $logInfo $ "Initialising configuration using resolver: " <> resolverName r
+    $logInfo $ "Initialising configuration using resolver: " <> sdResolverName sd
     $logInfo $ "Total number of user packages considered: "
                <> T.pack (show (Map.size bundle + length dupPkgs))
 
@@ -191,14 +187,24 @@ renderStackYaml p ignoredPackages dupPackages =
         <> B.byteString footerHelp
 
     goComment o (name, comment) =
-        case HM.lookup name o of
+        case (convert <$> HM.lookup name o) <|> nonPresentValue name of
             Nothing -> assert (name == "user-message") mempty
             Just v ->
                 B.byteString comment <>
                 B.byteString "\n" <>
-                B.byteString (Yaml.encode $ Yaml.object [(name, v)]) <>
+                v <>
                 if name == "packages" then commentedPackages else "" <>
                 B.byteString "\n"
+      where
+        convert v = B.byteString (Yaml.encode $ Yaml.object [(name, v)])
+
+        -- Some fields in stack.yaml are optional and may not be
+        -- generated. For these, we provided commented out dummy
+        -- values to go along with the comments.
+        nonPresentValue "extra-deps" = Just "# extra-deps: []\n"
+        nonPresentValue "flags" = Just "# flags: {}\n"
+        nonPresentValue "extra-package-dbs" = Just "# extra-package-dbs: []\n"
+        nonPresentValue _ = Nothing
 
     commentLine l | null l = "#"
                   | otherwise = "# " ++ l
@@ -244,7 +250,7 @@ renderStackYaml p ignoredPackages dupPackages =
         , ""
         , "Some commonly used options have been documented as comments in this file."
         , "For advanced use and comprehensive documentation of the format, please see:"
-        , "http://docs.haskellstack.org/en/stable/yaml_configuration/"
+        , "https://docs.haskellstack.org/en/stable/yaml_configuration/"
         ]
 
     resolverHelp = commentHelp
@@ -309,9 +315,8 @@ renderStackYaml p ignoredPackages dupPackages =
         , "compiler-check: newer-minor"
         ]
 
-getSnapshots' :: (StackM env m, HasConfig env)
-              => m Snapshots
-getSnapshots' =
+getSnapshots' :: HasConfig env => RIO env Snapshots
+getSnapshots' = do
     getSnapshots `catchAny` \e -> do
         $logError $
             "Unable to download snapshot list, and therefore could " <>
@@ -327,18 +332,19 @@ getSnapshots' =
         $logError "    http://docs.haskellstack.org/en/stable/yaml_configuration/"
         $logError ""
         $logError $ "Exception was: " <> T.pack (show e)
-        error ""
+        throwString ""
 
 -- | Get the default resolver value
 getDefaultResolver
-    :: (StackM env m, HasConfig env, HasGHCVariant env)
+    :: (HasConfig env, HasGHCVariant env)
     => WhichSolverCmd
     -> Path Abs File   -- ^ stack.yaml
     -> InitOpts
     -> Maybe AbstractResolver
     -> Map PackageName (Path Abs File, C.GenericPackageDescription)
        -- ^ Src package name: cabal dir, cabal package description
-    -> m ( Resolver
+    -> RIO env
+         ( SnapshotDef
          , Map PackageName (Map FlagName Bool)
          , Map PackageName Version
          , Map PackageName (Path Abs File, C.GenericPackageDescription))
@@ -346,51 +352,54 @@ getDefaultResolver
        --   , Flags for src packages and extra deps
        --   , Extra dependencies
        --   , Src packages actually considered)
-getDefaultResolver whichCmd stackYaml initOpts mresolver bundle =
-    maybe selectSnapResolver makeConcreteResolver mresolver
-      >>= getWorkingResolverPlan whichCmd stackYaml initOpts bundle
+getDefaultResolver whichCmd stackYaml initOpts mresolver bundle = do
+    sd <- maybe selectSnapResolver (makeConcreteResolver (Just root) >=> loadResolver) mresolver
+    getWorkingResolverPlan whichCmd stackYaml initOpts bundle sd
     where
+        root = parent stackYaml
         -- TODO support selecting best across regular and custom snapshots
         selectSnapResolver = do
             let gpds = Map.elems (fmap snd bundle)
             snaps <- fmap getRecommendedSnapshots getSnapshots'
-            (s, r) <- selectBestSnapshot gpds snaps
+            sds <- mapM (loadResolver . ResolverSnapshot) snaps
+            (s, r) <- selectBestSnapshot (parent stackYaml) gpds sds
             case r of
                 BuildPlanCheckFail {} | not (omitPackages initOpts)
                         -> throwM (NoMatchingSnapshot whichCmd snaps)
-                _ -> return $ ResolverSnapshot s
+                _ -> return s
 
 getWorkingResolverPlan
-    :: (StackM env m, HasConfig env, HasGHCVariant env)
+    :: (HasConfig env, HasGHCVariant env)
     => WhichSolverCmd
     -> Path Abs File   -- ^ stack.yaml
     -> InitOpts
     -> Map PackageName (Path Abs File, C.GenericPackageDescription)
        -- ^ Src package name: cabal dir, cabal package description
-    -> Resolver
-    -> m ( Resolver
+    -> SnapshotDef
+    -> RIO env
+         ( SnapshotDef
          , Map PackageName (Map FlagName Bool)
          , Map PackageName Version
          , Map PackageName (Path Abs File, C.GenericPackageDescription))
-       -- ^ ( Resolver
+       -- ^ ( SnapshotDef
        --   , Flags for src packages and extra deps
        --   , Extra dependencies
        --   , Src packages actually considered)
-getWorkingResolverPlan whichCmd stackYaml initOpts bundle resolver = do
-    $logInfo $ "Selected resolver: " <> resolverName resolver
+getWorkingResolverPlan whichCmd stackYaml initOpts bundle sd = do
+    $logInfo $ "Selected resolver: " <> sdResolverName sd
     go bundle
     where
         go info = do
-            eres <- checkBundleResolver whichCmd stackYaml initOpts info resolver
+            eres <- checkBundleResolver whichCmd stackYaml initOpts info sd
             -- if some packages failed try again using the rest
             case eres of
-                Right (f, edeps)-> return (resolver, f, edeps, info)
+                Right (f, edeps)-> return (sd, f, edeps, info)
                 Left ignored
                     | Map.null available -> do
                         $logWarn "*** Could not find a working plan for any of \
                                  \the user packages.\nProceeding to create a \
                                  \config anyway."
-                        return (resolver, Map.empty, Map.empty, Map.empty)
+                        return (sd, Map.empty, Map.empty, Map.empty)
                     | otherwise -> do
                         when (Map.size available == Map.size info) $
                             error "Bug: No packages to ignore"
@@ -400,7 +409,10 @@ getWorkingResolverPlan whichCmd stackYaml initOpts bundle resolver = do
                           $logWarn $ indent $ showItems ignored
                         else
                           $logWarn $ "*** Ignoring package: "
-                                 <> T.pack (packageNameString (head ignored))
+                                 <> T.pack (packageNameString
+                                                (case ignored of
+                                                    [] -> error "getWorkingResolverPlan.head"
+                                                    x:_ -> x))
 
                         go available
                     where
@@ -409,17 +421,18 @@ getWorkingResolverPlan whichCmd stackYaml initOpts bundle resolver = do
                       available       = Map.filterWithKey isAvailable info
 
 checkBundleResolver
-    :: (StackM env m, HasConfig env, HasGHCVariant env)
+    :: (HasConfig env, HasGHCVariant env)
     => WhichSolverCmd
     -> Path Abs File   -- ^ stack.yaml
     -> InitOpts
     -> Map PackageName (Path Abs File, C.GenericPackageDescription)
        -- ^ Src package name: cabal dir, cabal package description
-    -> Resolver
-    -> m (Either [PackageName] ( Map PackageName (Map FlagName Bool)
+    -> SnapshotDef
+    -> RIO env
+         (Either [PackageName] ( Map PackageName (Map FlagName Bool)
                                , Map PackageName Version))
-checkBundleResolver whichCmd stackYaml initOpts bundle resolver = do
-    result <- checkResolverSpec gpds Nothing resolver
+checkBundleResolver whichCmd stackYaml initOpts bundle sd = do
+    result <- checkSnapBuildPlan (parent stackYaml) gpds Nothing sd
     case result of
         BuildPlanCheckOk f -> return $ Right (f, Map.empty)
         BuildPlanCheckPartial f e
@@ -430,18 +443,19 @@ checkBundleResolver whichCmd stackYaml initOpts bundle resolver = do
                 warnPartial result
                 $logWarn "*** Omitting packages with unsatisfied dependencies"
                 return $ Left $ failedUserPkgs e
-            | otherwise -> throwM $ ResolverPartial whichCmd resolver (show result)
+            | otherwise -> throwM $ ResolverPartial whichCmd (sdResolverName sd) (show result)
         BuildPlanCheckFail _ e _
             | omitPackages initOpts -> do
                 $logWarn $ "*** Resolver compiler mismatch: "
-                           <> resolverName resolver
+                           <> sdResolverName sd
                 $logWarn $ indent $ T.pack $ show result
                 return $ Left $ failedUserPkgs e
-            | otherwise -> throwM $ ResolverMismatch whichCmd resolver (show result)
+            | otherwise -> throwM $ ResolverMismatch whichCmd (sdResolverName sd) (show result)
     where
+      resolver = sdResolver sd
       indent t  = T.unlines $ fmap ("    " <>) (T.lines t)
       warnPartial res = do
-          $logWarn $ "*** Resolver " <> resolverName resolver
+          $logWarn $ "*** Resolver " <> sdResolverName sd
                       <> " will need external packages: "
           $logWarn $ indent $ T.pack $ show res
 
@@ -453,7 +467,7 @@ checkBundleResolver whichCmd stackYaml initOpts bundle resolver = do
               srcConstraints = mergeConstraints (gpdPackages gpds) flags
 
           eresult <- solveResolverSpec stackYaml cabalDirs
-                                       (resolver, srcConstraints, Map.empty)
+                                       (sd, srcConstraints, Map.empty)
           case eresult of
               Right (src, ext) ->
                   return $ Right (fmap snd (Map.union src ext), fmap fst ext)
@@ -469,17 +483,18 @@ checkBundleResolver whichCmd stackYaml initOpts bundle resolver = do
       -- the list of packages when there is conflict in dependencies among this
       -- set of packages.
       findOneIndependent packages flags = do
-          platform <- asks (configPlatform . getConfig)
-          (compiler, _) <- getResolverConstraints stackYaml resolver
-          let getGpd pkg = snd (fromJust (Map.lookup pkg bundle))
-              getFlags pkg = fromJust (Map.lookup pkg flags)
+          platform <- view platformL
+          menv <- getMinimalEnvOverride
+          (compiler, _) <- getResolverConstraints menv Nothing stackYaml sd
+          let getGpd pkg = snd (fromMaybe (error "findOneIndependent: getGpd") (Map.lookup pkg bundle))
+              getFlags pkg = fromMaybe (error "fromOneIndependent: getFlags") (Map.lookup pkg flags)
               deps pkg = gpdPackageDeps (getGpd pkg) compiler platform
                                         (getFlags pkg)
               allDeps = concatMap (Map.keys . deps) packages
               isIndependent pkg = pkg `notElem` allDeps
 
               -- prefer to reject packages in deeper directories
-              path pkg = fst (fromJust (Map.lookup pkg bundle))
+              path pkg = fst (fromMaybe (error "findOneIndependent: path") (Map.lookup pkg bundle))
               pathlen = length . FP.splitPath . toFilePath . path
               maxPathlen = maximumBy (compare `on` pathlen)
 

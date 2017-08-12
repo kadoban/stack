@@ -1,6 +1,6 @@
 # Install/upgrade
 
-For many Un*x operating systems, all you need to do is run:
+For common Un*x operating systems (including macOS), all you need to do is run:
 
     curl -sSL https://get.haskellstack.org/ | sh
 
@@ -9,8 +9,8 @@ or:
     wget -qO- https://get.haskellstack.org/ | sh
 
 Distribution packages are available for [Ubuntu](#ubuntu), [Debian](#debian),
-[CentOS / Red Hat / Amazon Linux](#centos), [Fedora](#fedora),
-[Arch Linux](#arch-linux) and unofficially [FreeBSD](#freebsd).
+[Fedora](#fedora),
+[Arch Linux](#arch-linux) and [FreeBSD](#freebsd).
 Binaries for other operating systems are listed below, and available on
 [the Github releases page](https://github.com/fpco/stack/releases). For the
 future, we are open to supporting more OSes (to request one, please
@@ -24,69 +24,49 @@ find links that always point to the latest bindists
 
 ## Windows
 
-*Note*: Due to specific Windows limitations,
- [some temporary workarounds](https://www.fpcomplete.com/blog/2015/08/stack-ghc-windows)
- may be required. It is strongly advised to set your `STACK_ROOT` environment
- variable similarly to your root (e.g., `set STACK_ROOT=c:\stack_root`) *before*
- running `stack`.
-
-*Note:* while generally 32-bit GHC is better tested on Windows, there are
-reports that recent versions of Windows only work with the 64-bit version of
-Stack (see
-[issue #393](https://github.com/commercialhaskell/stack/issues/393)).
-
-### Installer
-
 We recommend installing to the default location with these installers, as that
 will make `stack install` and `stack upgrade` work correctly out of the box.
 
-  * [Windows 32-bit Installer](https://www.stackage.org/stack/windows-i386-installer)
   * [Windows 64-bit Installer](https://www.stackage.org/stack/windows-x86_64-installer)
+  * [Windows 32-bit Installer](https://www.stackage.org/stack/windows-i386-installer)
+
+If in doubt: you should prefer the 64-bit installer.
 
 ### Manual download
 
 * Download the latest release:
 
-    * [Windows 32-bit](https://www.stackage.org/stack/windows-i386)
     * [Windows 64-bit](https://www.stackage.org/stack/windows-x86_64)
+    * [Windows 32-bit](https://www.stackage.org/stack/windows-i386)
 
 * Unpack the archive and place `stack.exe` somewhere on your `%PATH%` (see
   [Path section below](#path)) and you can then run `stack` on the command line.
 
 * Now you can run `stack` from the terminal.
 
-NOTE: These executables have been built and tested on a Windows 7, 8.1, and 10
-64-bit machines. They should run on older Windows installs as well, but have not
-been tested. If you do test, please edit and update this page to indicate as
-such.
+## macOS
 
-## Mac OS X
-
-
-We generally test on the current version of Mac OS X, but Stack is known to work
-on El Capitan, Yosemite and Mavericks as well, and may also work on older
+We generally test on the current version of macOS, but Stack is known to work
+on Sierra, El Capitan, Yosemite and Mavericks as well, and may also work on older
 versions (YMMV).
 
-**macOS Sierra warning**: There are new limitations in the dynamic linker that
-are causing problems for GHC when building projects with many
-dependencies. See
-[#2577](https://github.com/commercialhaskell/stack/issues/2577) for more
-information.
+### Installer script
+
+Run:
+
+    curl -sSL https://get.haskellstack.org/ | sh
 
 ### Manual download
 
 * Download the latest release:
-    * [Mac OS X 64-bit](https://www.stackage.org/stack/osx-x86_64)
+    * [macOS 64-bit](https://www.stackage.org/stack/osx-x86_64)
 * Extract the archive and place `stack` somewhere on your `$PATH` (see
   [Path section below](#path))
 * Now you can run `stack` from the terminal.
 
 ### Using Homebrew
 
-**macOS Sierra warning**: Homebrew's haskell-stack formula may not currently
-work on Sierra, so we suggest using the manual above for now.
-
-If you have a popular [brew](http://brew.sh/) tool installed, you can just do:
+If you have the popular [brew](https://brew.sh/) tool installed, you can just do:
 
     brew install haskell-stack
 
@@ -95,7 +75,7 @@ but tend to be updated within a day or two.
 * Normally, Homebrew will install from a pre-built binary (aka "pour from a
 bottle"), but if `brew` starts trying to build everything from source (which
 will take hours), see
-[their FAQ on the topic](https://github.com/Homebrew/homebrew/blob/master/share/doc/homebrew/FAQ.md#why-do-you-compile-everything).
+[their FAQ on the topic](https://github.com/Homebrew/brew/blob/master/docs/FAQ.md#why-do-you-compile-everything).
 
 ### Notes
 
@@ -108,115 +88,57 @@ problems, see the linked FAQ entries:
 
   * [GHC 7.8.4 fails with `/usr/bin/ar: permission denied`](faq.md#usr-bin-ar-permission-denied)
   * [DYLD_LIBRARY_PATH is ignored](faq.md#dyld-library-path-ignored)
+  
+
+If you are on OS X 10.12 ("Sierra") and encounter [GHC panic while building, see this issue](https://github.com/commercialhaskell/stack/issues/2577)
 
 ## Ubuntu
 
-*note*: for 32-bit, use the [generic Linux option](#linux)
+Use the [generic Linux option](#linux).
 
- 1. Get the FP Complete key:
-
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 575159689BEFB442
-
- 2. Add the appropriate source repository (if not sure, run ``lsb_release -a`` to find out your Ubuntu version):
-
-      * Ubuntu 16.10 (amd64):
-
-            echo 'deb http://download.fpcomplete.com/ubuntu yakkety main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
-      * Ubuntu 16.04 (amd64):
-
-            echo 'deb http://download.fpcomplete.com/ubuntu xenial main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
-      * Ubuntu 15.10 (amd64):
-
-            echo 'deb http://download.fpcomplete.com/ubuntu wily main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
-      * Ubuntu 14.04 (amd64)
-
-            echo 'deb http://download.fpcomplete.com/ubuntu trusty main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
-      * Ubuntu 12.04 (amd64)
-
-            echo 'deb http://download.fpcomplete.com/ubuntu precise main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
- 3. Update apt and install
-
-        sudo apt-get update && sudo apt-get install stack -y
+There is also
+a
+[Ubuntu package](http://packages.ubuntu.com/search?keywords=haskell-stack&searchon=names&suite=all&section=all) for
+Ubuntu 16.04 and up. Note that the distribution's Stack version lags behind, so
+we recommend running `stack upgrade` after installing it.
 
 ## Debian
 
-*note*: for 32-bit, use the [generic Linux option](#linux)
+Use the [generic Linux option](#linux).
 
- 1. Get the FP Complete key:
-
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 575159689BEFB442
-
- 2. Add the appropriate source repository:
-
-      * Debian 8 (amd64):
-
-            echo 'deb http://download.fpcomplete.com/debian jessie main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
-      * Debian 7 (amd64)
-
-            echo 'deb http://download.fpcomplete.com/debian wheezy main'|sudo tee /etc/apt/sources.list.d/fpco.list
-
-    For unstable Debian distributions, the package from the most recent stable
-    release will usually work. If it doesn't, please
-    [report it](https://github.com/commercialhaskell/stack/issues/new).
-
- 3. Update apt and install
-
-        sudo apt-get update && sudo apt-get install stack -y
+There is also
+a
+[Debian package](https://packages.debian.org/search?keywords=haskell-stack&searchon=names&suite=all&section=all) for
+Stretch and up. Note that the distribution's Stack version lags behind, so
+we recommend running `stack upgrade` after installing it.
 
 ## <a name="centos"></a>CentOS / Red Hat / Amazon Linux
 
-*note*: for 32-bit, use the [generic Linux option](#linux)
+Use the [generic Linux option](#linux).
 
- 1. Add the appropriate source repository:
-
-      * CentOS 7 / RHEL 7 (x86_64)
-
-            curl -sSL https://download.fpcomplete.com/centos/7/fpco.repo | sudo tee /etc/yum.repos.d/fpco.repo
-
-      * CentOS 6 / RHEL 6 (x86_64)
-
-            curl -sSL https://download.fpcomplete.com/centos/6/fpco.repo | sudo tee /etc/yum.repos.d/fpco.repo
-
- 2. Install:
-
-        sudo yum -y install stack
+There is also an unofficial
+[Copr repo](https://copr.fedoraproject.org/coprs/petersen/stack/).
+Note that this Stack version may lag behind,
+so we recommend running `stack upgrade` after installing it.
 
 ## Fedora
 
-*Note*: for 32-bit, you can use this
- [Fedora Copr repo](https://copr.fedoraproject.org/coprs/petersen/stack/) (not
- managed by the Stack release team, so not guaranteed to have the very latest
- version) which can be enabled with: `sudo dnf copr enable petersen/stack`
+Use the [generic Linux option](#linux).
 
-   1. Add the appropriate source repository:
-
-      * Fedora 24 (x86_64)
-
-            curl -sSL https://download.fpcomplete.com/fedora/24/fpco.repo | sudo tee /etc/yum.repos.d/fpco.repo
-
-      * Fedora 23 (x86_64)
-
-            curl -sSL https://download.fpcomplete.com/fedora/23/fpco.repo | sudo tee /etc/yum.repos.d/fpco.repo
-
-      * Fedora 22 (x86_64)
-
-            curl -sSL https://download.fpcomplete.com/fedora/22/fpco.repo | sudo tee /etc/yum.repos.d/fpco.repo
-
-   2. Install:
-
-        sudo dnf -y install stack
+There is also an
+unofficial
+[Fedora Copr repo](https://copr.fedoraproject.org/coprs/petersen/stack/) which
+can be enabled with: `sudo dnf copr enable petersen/stack`. Note that this Stack
+version may lag behind, so we recommend running `stack upgrade` after installing
+it.
 
 ## <a name="suse"></a>openSUSE / SUSE Linux Enterprise
 
-*Note:* openSUSE's and SLE's `stack` package isn't managed by the Stack release
-team, and since it is based on the version in Stackage LTS, and may lag new
-releases by ten days or more.
+Use the [generic Linux option](#linux).
+
+There is also an unofficial SUSE package.  Note that this Stack
+version may lag behind, so we recommend running `stack upgrade` after installing
+it.  To install it:
 
  1. Add the appropriate OBS repository:
 
@@ -238,9 +160,14 @@ releases by ten days or more.
 
 ## Arch Linux
 
-*Note:* `stack` package in the [community] repository isn't managed by the
-Stack release team. Depending on the maintainer's availability, it can lag
-new releases by some days.
+There is an official package in the Arch community repository. So you can
+install it by simply doing:
+
+    sudo pacman -S stack
+
+Note that this version may slightly lag behind, but it should be updated within
+the day. The package is also always rebuilt and updated when one of it's
+dependencies gets an update.
 
   - [stack](https://www.archlinux.org/packages/community/x86_64/stack/) _latest stable version_
   - [haskell-stack-git](https://aur.archlinux.org/packages/haskell-stack-git/) _git version_
@@ -281,19 +208,29 @@ For more information on using Stack together with Nix, please see [the NixOS
 manual section on
 Stack](http://nixos.org/nixpkgs/manual/#how-to-build-a-haskell-project-using-stack).
 
-## Linux
+## <a name="linux"></a>Linux (generic)
 
-(64-bit and 32-bit options available)
+### Installer script
+
+Run:
+
+    curl -sSL https://get.haskellstack.org/ | sh
+
+or:
+
+    wget -qO- https://get.haskellstack.org/ | sh
+
+### Manual download
 
 * Download the latest release:
 
-    * [Linux 64-bit, standard](https://www.stackage.org/stack/linux-x86_64)
+    * [Linux 64-bit, static](https://www.stackage.org/stack/linux-x86_64-static)
+
     * [Linux 32-bit, standard](https://www.stackage.org/stack/linux-i386)
 
-    If you are on an older distribution that only includes libgmp4 (libgmp.so.3), such as CentOS/RHEL/Amazon Linux 6.x, use one of these instead:
-
-    * [Linux 64-bit, libgmp4](https://www.stackage.org/stack/linux-x86_64-gmp4)
     * [Linux 32-bit, libgmp4](https://www.stackage.org/stack/linux-i386-gmp4)
+      (if you are on an older 32-bit distribution that only includes libgmp4
+      (libgmp.so.3), such as CentOS/RHEL/Amazon Linux 6.)
 
 * Extract the archive and place `stack` somewhere on your `$PATH` (see [Path section below](#path))
 
@@ -319,6 +256,14 @@ Stack](http://nixos.org/nixpkgs/manual/#how-to-build-a-haskell-project-using-sta
 
 (only 64-bit currently available, tested on FreeBSD 10.3-RELEASE)
 
+### Installer script
+
+Run:
+
+    curl -sSL https://get.haskellstack.org/ | sh
+
+### Manual download
+
 * Install required dependencies:
 
         pkg install devel/gmake perl5 lang/gcc misc/compat8x misc/compat9x converters/libiconv ca_root_nss
@@ -330,10 +275,6 @@ Stack](http://nixos.org/nixpkgs/manual/#how-to-build-a-haskell-project-using-sta
 * Extract the archive and place `stack` somewhere on your `$PATH` (see [Path section below](#path))
 
 * Now you can run `stack` from the terminal.
-
-An unofficial package repository for FreeBSD 10 (amd64 only) and install
-instructions are available at [http://stack-pkg.applicative.tech](http://stack-pkg.applicative.tech/).  The
-repository is not official and as such might lag behind new releases.
 
 ## Path
 
@@ -354,8 +295,18 @@ For more information and other shells, see [the shell auto-completion page](shel
 
 ## Upgrade
 
-There are essentially three different approaches to upgrade:
+There are essentially four different approaches to upgrade:
 
-* If you're using a package manager (e.g., the Ubuntu debs listed above) and are happy with sticking with the officially released binaries, simply follow your normal package manager strategies for upgrading (e.g. `apt-get update && apt-get upgrade`).
-* If you're not using a package manager but want to stick with the official binaries (such as on Windows or Mac), you'll need to manually follow the steps above to download the newest binaries from the release page and replace the old binary.
-* The `stack` tool itself ships with an `upgrade` command, which will build `stack` from source and install it to the default install path (see the previous section). You can use `stack upgrade` to get the latest official release, and `stack upgrade --git` to install from Git and live on the bleeding edge. If you follow this, make sure that this directory is on your `PATH` and takes precedence over the system installed `stack`. For more information, see [this discussion](https://github.com/commercialhaskell/stack/issues/237#issuecomment-126793301).
+* The `stack` tool itself ships with an `upgrade` command, which download a `stack` binary or build it from source and install it to the default install path (e.g. `~/.local/bin` or `%APPDATA%\local\bin`; see the [Path](#Path) section above). You can use `stack upgrade` to get the latest official release, and `stack upgrade --git` to install from Git and live on the bleeding edge. Make sure the default install directory is on your `PATH` and takes precedence over the system installed `stack`, or copy `stack` from that directory to the system location afterward. For more information, see [this discussion](https://github.com/commercialhaskell/stack/issues/237#issuecomment-126793301).
+
+* If you're using a package manager and are happy with sticking with the officially released binaries from the distribution (which may the lag behind latest version of Stack significantly), simply follow your normal package manager strategies for upgrading (e.g. `apt-get update && apt-get upgrade`).
+
+* The get.haskellstack.org script supports the `-f` argument to over-write the current stack executable.  For example:
+
+      curl -sSL https://get.haskellstack.org/ | sh -s - -f
+
+  or:
+
+      wget -qO- https://get.haskellstack.org/ | sh -s - -f
+
+* Manually follow the steps above to download the newest binaries from the release page and replace the old binary.

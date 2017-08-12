@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE KindSignatures #-}
@@ -21,17 +22,9 @@ module System.Process.Run
     )
     where
 
-import           Control.Exception.Lifted
-import           Control.Monad (liftM)
-import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Control.Monad.Logger (MonadLogger, logError)
-import           Control.Monad.Trans.Control (MonadBaseControl)
+import           Stack.Prelude
 import           Data.Conduit.Process hiding (callProcess)
-import           Data.Foldable (forM_)
-import           Data.Text (Text)
 import qualified Data.Text as T
-import           Path (Dir, Abs, Path, toFilePath)
-import           Prelude -- Fix AMP warning
 import           System.Exit (exitWith, ExitCode (..))
 import           System.IO
 import qualified System.Process
@@ -51,14 +44,14 @@ data Cmd = Cmd
 -- If it exits with anything but success, prints an error
 -- and then calls 'exitWith' to exit the program.
 runCmd :: forall (m :: * -> *).
-         (MonadLogger m,MonadIO m,MonadBaseControl IO m)
+         (MonadLogger m, MonadUnliftIO m)
       => Cmd
       -> Maybe Text  -- ^ optional additional error message
       -> m ()
 runCmd = runCmd' id
 
 runCmd' :: forall (m :: * -> *).
-         (MonadLogger m,MonadIO m,MonadBaseControl IO m)
+         (MonadLogger m, MonadUnliftIO m)
       => (CreateProcess -> CreateProcess)
       -> Cmd
       -> Maybe Text  -- ^ optional additional error message
@@ -105,7 +98,7 @@ callProcess' modCP cmd = do
         exit_code <- waitForProcess p
         case exit_code of
             ExitSuccess   -> return ()
-            ExitFailure _ -> throwIO (ProcessExitedUnsuccessfully c exit_code)
+            ExitFailure _ -> throwM (ProcessExitedUnsuccessfully c exit_code)
 
 callProcessInheritStderrStdout :: (MonadIO m, MonadLogger m) => Cmd -> m ()
 callProcessInheritStderrStdout cmd = do
@@ -122,7 +115,7 @@ callProcessObserveStdout cmd = do
         exit_code <- waitForProcess p
         case exit_code of
             ExitSuccess   -> hGetLine hStdout
-            ExitFailure _ -> throwIO (ProcessExitedUnsuccessfully c exit_code)
+            ExitFailure _ -> throwM (ProcessExitedUnsuccessfully c exit_code)
   where
     modCP c = c { std_in = CreatePipe, std_out = CreatePipe, std_err = Inherit }
 

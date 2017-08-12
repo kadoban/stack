@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- | Extra Path utilities.
@@ -7,6 +8,7 @@ module Path.Extra
   ,dropRoot
   ,parseCollapsedAbsDir
   ,parseCollapsedAbsFile
+  ,concatAndColapseAbsDir
   ,rejectMissingFile
   ,rejectMissingDir
   ,pathToByteString
@@ -18,9 +20,7 @@ import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
-import           Control.Monad (liftM)
-import           Control.Monad.Catch
-import           Control.Monad.IO.Class
+import           Stack.Prelude
 import           Data.Bool (bool)
 import           Path
 import           Path.IO
@@ -43,6 +43,12 @@ parseCollapsedAbsDir = parseAbsDir . collapseFilePath
 parseCollapsedAbsFile :: MonadThrow m => FilePath -> m (Path Abs File)
 parseCollapsedAbsFile = parseAbsFile . collapseFilePath
 
+-- | Add a relative FilePath to the end of a Path
+-- We can't parse the FilePath first because we need to account for ".."
+-- in the FilePath (#2895)
+concatAndColapseAbsDir :: MonadThrow m => Path Abs Dir -> FilePath -> m (Path Abs Dir)
+concatAndColapseAbsDir base rel = parseCollapsedAbsDir (toFilePath base FP.</> rel)
+
 -- | Collapse intermediate "." and ".." directories from a path.
 --
 -- > collapseFilePath "./foo" == "foo"
@@ -55,7 +61,7 @@ parseCollapsedAbsFile = parseAbsFile . collapseFilePath
 --
 -- (adapted from @Text.Pandoc.Shared@)
 collapseFilePath :: FilePath -> FilePath
-collapseFilePath = FP.joinPath . reverse . foldl go [] . FP.splitDirectories
+collapseFilePath = FP.joinPath . reverse . foldl' go [] . FP.splitDirectories
   where
     go rs "." = rs
     go r@(p:rs) ".." = case p of

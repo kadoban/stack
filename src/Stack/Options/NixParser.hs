@@ -1,13 +1,13 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stack.Options.NixParser where
 
-import           Data.Monoid.Extra
-import qualified Data.Text                         as T
-import           Options.Applicative
-import           Options.Applicative.Args
-import           Options.Applicative.Builder.Extra
-import           Stack.Nix
-import           Stack.Options.Utils
-import           Stack.Types.Nix
+import Options.Applicative
+import Options.Applicative.Args
+import Options.Applicative.Builder.Extra
+import Stack.Nix
+import Stack.Options.Utils
+import Stack.Prelude
+import Stack.Types.Nix
 
 nixOptsParser :: Bool -> Parser NixOptsMonoid
 nixOptsParser hide0 = overrideActivation <$>
@@ -17,7 +17,7 @@ nixOptsParser hide0 = overrideActivation <$>
                      "use of a Nix-shell. Implies 'system-ghc: true'"
                      hide
   <*> firstBoolFlags "nix-pure"
-                     "use of a pure Nix-shell. Implies 'system-ghc: true'"
+                     "use of a pure Nix-shell. Implies '--nix' and 'system-ghc: true'"
                      hide
   <*> optionalFirst
           (textArgsOption
@@ -29,7 +29,8 @@ nixOptsParser hide0 = overrideActivation <$>
           (option
               str
               (long "nix-shell-file" <>
-               metavar "FILEPATH" <>
+               metavar "FILE" <>
+               completer (fileExtCompleter [".nix"]) <>
                help "Nix file to be used to launch a nix-shell (for regular Nix users)" <>
                hide))
   <*> optionalFirst
@@ -51,6 +52,6 @@ nixOptsParser hide0 = overrideActivation <$>
   where
     hide = hideMods hide0
     overrideActivation m =
-      if m /= mempty then m { nixMonoidEnable = (First . Just . fromFirst True) (nixMonoidEnable m) }
-      else m
-    textArgsOption = fmap (map T.pack) . argsOption
+      if fromFirst False (nixMonoidPureShell m)
+        then m { nixMonoidEnable = (First . Just . fromFirst True) (nixMonoidEnable m) }
+        else m

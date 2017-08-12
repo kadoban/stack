@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds       #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -16,36 +17,20 @@ module Stack.Coverage
     , generateHpcMarkupIndex
     ) where
 
-import           Control.Exception.Safe (handleIO)
-import           Control.Exception.Lifted
-import           Control.Monad (liftM, when, unless, void, (<=<))
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
-import           Control.Monad.Reader (asks)
-import           Control.Monad.Trans.Resource
+import           Stack.Prelude
 import qualified Data.ByteString.Char8 as S8
-import           Data.Foldable (forM_, asum, toList)
-import           Data.Function
 import           Data.List
 import qualified Data.Map.Strict as Map
-import           Data.Maybe
-import           Data.Maybe.Extra (mapMaybeM)
-import           Data.Monoid ((<>))
-import           Data.String
-import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as LT
-import           Data.Traversable (forM)
 import           Path
 import           Path.Extra (toFilePathNoTrailingSep)
 import           Path.IO
-import           Prelude hiding (FilePath, writeFile)
-import           Stack.Build.Source (parseTargetsFromBuildOpts)
 import           Stack.Build.Target
 import           Stack.Config (getLocalPackages)
-import           Stack.Constants
+import           Stack.Constants.Config
 import           Stack.Package
 import           Stack.PrettyPrint
 import           Stack.Types.Compiler
@@ -53,7 +38,7 @@ import           Stack.Types.Config
 import           Stack.Types.Package
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT (StackM)
+import           Stack.Types.Runner
 import           Stack.Types.Version
 import           System.FilePath (isPathSeparator)
 import           System.Process.Read
@@ -62,21 +47,19 @@ import           Trace.Hpc.Tix
 import           Web.Browser (openBrowser)
 
 -- | Invoked at the beginning of running with "--coverage"
-deleteHpcReports :: (StackM env m, HasEnvConfig env)
-                 => m ()
+deleteHpcReports :: HasEnvConfig env => RIO env ()
 deleteHpcReports = do
     hpcDir <- hpcReportDir
-    ignoringAbsence (removeDirRecur hpcDir)
+    liftIO $ ignoringAbsence (removeDirRecur hpcDir)
 
 -- | Move a tix file into a sub-directory of the hpc report directory. Deletes the old one if one is
 -- present.
-updateTixFile :: (StackM env m, HasEnvConfig env)
-              => PackageName -> Path Abs File -> String -> m ()
+updateTixFile :: HasEnvConfig env => PackageName -> Path Abs File -> String -> RIO env ()
 updateTixFile pkgName tixSrc testName = do
     exists <- doesFileExist tixSrc
     when exists $ do
         tixDest <- tixFilePath pkgName testName
-        ignoringAbsence (removeFile tixDest)
+        liftIO $ ignoringAbsence (removeFile tixDest)
         ensureDir (parent tixDest)
         -- Remove exe modules because they are problematic. This could be revisited if there's a GHC
         -- version that fixes https://ghc.haskell.org/trac/ghc/ticket/1853
@@ -89,11 +72,10 @@ updateTixFile pkgName tixSrc testName = do
                 -- have problems. Something about moving between drives
                 -- on windows?
                 copyFile tixSrc =<< parseAbsFile (toFilePath tixDest ++ ".premunging")
-                ignoringAbsence (removeFile tixSrc)
+                liftIO $ ignoringAbsence (removeFile tixSrc)
 
 -- | Get the directory used for hpc reports for the given pkgId.
-hpcPkgPath :: (StackM env m, HasEnvConfig env)
-            => PackageName -> m (Path Abs Dir)
+hpcPkgPath :: HasEnvConfig env => PackageName -> RIO env (Path Abs Dir)
 hpcPkgPath pkgName = do
     outputDir <- hpcReportDir
     pkgNameRel <- parseRelDir (packageNameString pkgName)
@@ -101,18 +83,18 @@ hpcPkgPath pkgName = do
 
 -- | Get the tix file location, given the name of the file (without extension), and the package
 -- identifier string.
-tixFilePath :: (StackM env m, HasEnvConfig env)
-            => PackageName -> String ->  m (Path Abs File)
+tixFilePath :: HasEnvConfig env
+            => PackageName -> String -> RIO env (Path Abs File)
 tixFilePath pkgName testName = do
     pkgPath <- hpcPkgPath pkgName
     tixRel <- parseRelFile (testName ++ "/" ++ testName ++ ".tix")
     return (pkgPath </> tixRel)
 
 -- | Generates the HTML coverage report and shows a textual coverage summary for a package.
-generateHpcReport :: (StackM env m, HasEnvConfig env)
-                  => Path Abs Dir -> Package -> [Text] -> m ()
+generateHpcReport :: HasEnvConfig env
+                  => Path Abs Dir -> Package -> [Text] -> RIO env ()
 generateHpcReport pkgDir package tests = do
-    compilerVersion <- asks (envConfigCompilerVersion . getEnvConfig)
+    compilerVersion <- view actualCompilerVersionL
     -- If we're using > GHC 7.10, the hpc 'include' parameter must specify a ghc package key. See
     -- https://github.com/commercialhaskell/stack/issues/785
     let pkgName = packageNameText (packageName package)
@@ -150,8 +132,9 @@ generateHpcReport pkgDir package tests = do
                 mreportPath <- generateHpcReportInternal tixSrc reportDir report extraArgs extraArgs
                 forM_ mreportPath (displayReportPath report)
 
-generateHpcReportInternal :: (StackM env m, HasEnvConfig env)
-                          => Path Abs File -> Path Abs Dir -> Text -> [String] -> [String] -> m (Maybe (Path Abs File))
+generateHpcReportInternal :: HasEnvConfig env
+                          => Path Abs File -> Path Abs Dir -> Text -> [String] -> [String]
+                          -> RIO env (Maybe (Path Abs File))
 generateHpcReportInternal tixSrc reportDir report extraMarkupArgs extraReportArgs = do
     -- If a .tix file exists, move it to the HPC output directory and generate a report for it.
     tixFileExists <- doesFileExist tixSrc
@@ -174,7 +157,7 @@ generateHpcReportInternal tixSrc reportDir report extraMarkupArgs extraReportArg
             -- Directories for .mix files.
             hpcRelDir <- hpcRelativeDir
             -- Compute arguments used for both "hpc markup" and "hpc report".
-            pkgDirs <- liftM Map.keys getLocalPackages
+            pkgDirs <- liftM (map lpvRoot . Map.elems . lpProject) getLocalPackages
             let args =
                     -- Use index files from all packages (allows cross-package coverage results).
                     concatMap (\x -> ["--srcdir", toFilePathNoTrailingSep x]) pkgDirs ++
@@ -225,8 +208,8 @@ data HpcReportOpts = HpcReportOpts
     , hroptsOpenBrowser :: Bool
     } deriving (Show)
 
-generateHpcReportForTargets :: (StackM env m, HasEnvConfig env)
-                            => HpcReportOpts -> m ()
+generateHpcReportForTargets :: HasEnvConfig env
+                            => HpcReportOpts -> RIO env ()
 generateHpcReportForTargets opts = do
     let (tixFiles, targetNames) = partition (".tix" `T.isSuffixOf`) (hroptsInputs opts)
     targetTixFiles <-
@@ -237,19 +220,17 @@ generateHpcReportForTargets opts = do
          else do
              when (hroptsAll opts && not (null targetNames)) $
                  $logWarn $ "Since --all is used, it is redundant to specify these targets: " <> T.pack (show targetNames)
-             (_,_,targets) <- parseTargetsFromBuildOpts
+             (_,_,targets) <- parseTargets
                  AllowNoTargets
                  defaultBuildOptsCLI
                     { boptsCLITargets = if hroptsAll opts then [] else targetNames }
              liftM concat $ forM (Map.toList targets) $ \(name, target) ->
                  case target of
-                     STUnknown -> fail $
-                         packageNameString name ++ " isn't a known local page"
-                     STNonLocal -> fail $
-                         "Expected a local package, but " ++
+                     TargetAll Dependency -> throwString $
+                         "Error: Expected a local package, but " ++
                          packageNameString name ++
                          " is either an extra-dep or in the snapshot."
-                     STLocalComps comps -> do
+                     TargetComps comps -> do
                          pkgPath <- hpcPkgPath name
                          forM (toList comps) $ \nc ->
                              case nc of
@@ -259,7 +240,7 @@ generateHpcReportForTargets opts = do
                                      "Can't specify anything except test-suites as hpc report targets (" ++
                                      packageNameString name ++
                                      " is used with a non test-suite target)"
-                     STLocalAll -> do
+                     TargetAll ProjectPackage -> do
                          pkgPath <- hpcPkgPath name
                          exists <- doesDirExist pkgPath
                          if exists
@@ -271,7 +252,7 @@ generateHpcReportForTargets opts = do
                              else return []
     tixPaths <- liftM (\xs -> xs ++ targetTixFiles) $ mapM (resolveFile' . T.unpack) tixFiles
     when (null tixPaths) $
-        fail "Not generating combined report, because no targets or tix files are specified."
+        throwString "Not generating combined report, because no targets or tix files are specified."
     outputDir <- hpcReportDir
     reportDir <- case hroptsDestDir opts of
         Nothing -> return (outputDir </> $(mkRelDir "combined/custom"))
@@ -288,8 +269,7 @@ generateHpcReportForTargets opts = do
                 void $ liftIO $ openBrowser (toFilePath reportPath)
             else displayReportPath report reportPath
 
-generateHpcUnifiedReport :: (StackM env m, HasEnvConfig env)
-                         => m ()
+generateHpcUnifiedReport :: HasEnvConfig env => RIO env ()
 generateHpcUnifiedReport = do
     outputDir <- hpcReportDir
     ensureDir outputDir
@@ -314,8 +294,9 @@ generateHpcUnifiedReport = do
             mreportPath <- generateUnionReport report reportDir tixFiles
             forM_ mreportPath (displayReportPath report)
 
-generateUnionReport :: (StackM env m, HasEnvConfig env)
-                    => Text -> Path Abs Dir -> [Path Abs File] -> m (Maybe (Path Abs File))
+generateUnionReport :: HasEnvConfig env
+                    => Text -> Path Abs Dir -> [Path Abs File]
+                    -> RIO env (Maybe (Path Abs File))
 generateUnionReport report reportDir tixFiles = do
     (errs, tix) <- fmap (unionTixes . map removeExeModules) (mapMaybeM readTixOrLog tixFiles)
     $logDebug $ "Using the following tix files: " <> T.pack (show tixFiles)
@@ -327,10 +308,10 @@ generateUnionReport report reportDir tixFiles = do
     liftIO $ writeTix (toFilePath tixDest) tix
     generateHpcReportInternal tixDest reportDir report [] []
 
-readTixOrLog :: (MonadLogger m, MonadIO m, MonadBaseControl IO m) => Path b File -> m (Maybe Tix)
+readTixOrLog :: (MonadLogger m, MonadUnliftIO m) => Path b File -> m (Maybe Tix)
 readTixOrLog path = do
-    mtix <- liftIO (readTix (toFilePath path)) `catch` \errorCall -> do
-        $logError $ "Error while reading tix: " <> T.pack (show (errorCall :: ErrorCall))
+    mtix <- liftIO (readTix (toFilePath path)) `catchAny` \errorCall -> do
+        $logError $ "Error while reading tix: " <> T.pack (show errorCall)
         return Nothing
     when (isNothing mtix) $
         $logError $ "Failed to read tix file " <> T.pack (toFilePath path)
@@ -351,8 +332,7 @@ unionTixes tixes = (Map.keys errs, Tix (Map.elems outputs))
         | hash1 == hash2 && len1 == len2 = Right (TixModule k hash1 len1 (zipWith (+) tix1 tix2))
     merge _ _ = Left ()
 
-generateHpcMarkupIndex :: (StackM env m, HasEnvConfig env)
-                       => m ()
+generateHpcMarkupIndex :: HasEnvConfig env => RIO env ()
 generateHpcMarkupIndex = do
     outputDir <- hpcReportDir
     let outputFile = outputDir </> $(mkRelFile "index.html")
@@ -427,8 +407,9 @@ dirnameString :: Path r Dir -> String
 dirnameString = dropWhileEnd isPathSeparator . toFilePath . dirname
 
 findPackageFieldForBuiltPackage
-    :: (StackM env m, HasEnvConfig env)
-    => Path Abs Dir -> PackageIdentifier -> Text -> m (Either Text Text)
+    :: HasEnvConfig env
+    => Path Abs Dir -> PackageIdentifier -> Text
+    -> RIO env (Either Text Text)
 findPackageFieldForBuiltPackage pkgDir pkgId field = do
     distDir <- distDirFromDir pkgDir
     let inplaceDir = distDir </> $(mkRelDir "package.conf.inplace")
@@ -439,7 +420,7 @@ findPackageFieldForBuiltPackage pkgDir pkgId field = do
             case asum (map (T.stripPrefix (field <> ": ")) (T.lines contents)) of
                 Just result -> return $ Right result
                 Nothing -> notFoundErr
-    cabalVer <- asks (envConfigCabalVersion . getEnvConfig)
+    cabalVer <- view cabalVersionL
     if cabalVer < $(mkVersion "1.24")
         then do
             path <- liftM (inplaceDir </>) $ parseRelFile (pkgIdStr ++ "-inplace.conf")
@@ -458,12 +439,12 @@ findPackageFieldForBuiltPackage pkgDir pkgId field = do
                 _ -> return $ Left $ "Multiple files matching " <> T.pack (pkgIdStr ++ "-*.conf") <> " found in " <>
                     T.pack (toFilePath inplaceDir) <> ". Maybe try 'stack clean' on this package?"
 
-displayReportPath :: (StackM env m, HasAnsiAnn (Ann a), Display a)
-                  => Text -> a -> m ()
+displayReportPath :: (HasAnsiAnn (Ann a), Display a, HasRunner env)
+                  => Text -> a -> RIO env ()
 displayReportPath report reportPath =
      $prettyInfo $ "The" <+> fromString (T.unpack report) <+> "is available at" <+> display reportPath
 
-findExtraTixFiles :: (StackM env m , HasEnvConfig env) => m [Path Abs File]
+findExtraTixFiles :: HasEnvConfig env => RIO env [Path Abs File]
 findExtraTixFiles = do
     outputDir <- hpcReportDir
     let dir = outputDir </> $(mkRelDir "extra-tix-files")

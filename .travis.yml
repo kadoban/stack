@@ -19,37 +19,41 @@ cache:
 matrix:
   fast_finish: true
   include:
-    - env: BUILD=cabal CABALVER=1.24 GHCVER=7.8.4 STACK_YAML=stack-7.8.yaml
-      compiler: ": #GHC 7.8.4"
-      addons: {apt: {packages: [cabal-install-1.24,ghc-7.8.4], sources: [hvr-ghc]}}
-
-    - env: BUILD=cabal CABALVER=1.22 GHCVER=7.10.3
+    - env: BUILD=cabal CABALVER=1.24 GHCVER=7.10.3
       compiler: ": #GHC 7.10.3"
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3], sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-1.24,ghc-7.10.3], sources: [hvr-ghc]}}
 
-    - env: BUILD=cabal CABALVER=1.24 GHCVER=8.0.1
-      compiler: ": #GHC 8.0.1"
-      addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.1], sources: [hvr-ghc]}}
+    - env: BUILD=stack STACK_YAML=stack-7.10.yaml
+      compiler: ": #stack 7.10.3"
+      addons: {apt: {packages: [ghc-7.10.3], sources: [hvr-ghc]}}
 
-    - env: BUILD=stack GHCVER=7.8.4 STACK_YAML=stack-7.8.yaml
-      compiler: ": #stack 7.8.4"
-      addons: {apt: {packages: [ghc-7.8.4], sources: [hvr-ghc]}}
-
-    - env: BUILD=stack STACK_YAML=stack.yaml
+    - env: BUILD=stack STACK_YAML=stack-7.10.yaml
       compiler: ": #stack 7.10.3 osx"
       os: osx
 
-    - env: BUILD=stack GHCVER=8.0.1 STACK_YAML=stack-8.0.yaml
-      compiler: ": #stack 8.0.1"
-      addons: {apt: {packages: [ghc-8.0.1], sources: [hvr-ghc]}}
+    - env: BUILD=cabal CABALVER=1.24 GHCVER=8.0.2
+      compiler: ": #GHC 8.0.2"
+      addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.2], sources: [hvr-ghc]}}
 
-    - env: BUILD=style GHCVER=8.0.1 STACK_YAML=stack-8.0.yaml
-      compiler: ": #stack 8.0.1"
-      addons: {apt: {packages: [ghc-8.0.1], sources: [hvr-ghc]}}
+    - env: BUILD=stack GHCVER=8.0.2 STACK_YAML=stack.yaml
+      compiler: ": #stack 8.0.2"
+      addons: {apt: {packages: [ghc-8.0.2], sources: [hvr-ghc]}}
+
+    - env: BUILD=stack GHCVER=8.0.2 STACK_YAML=stack.yaml
+      compiler: ": #stack 8.0.2 osx"
+      os: osx
+
+    - env: BUILD=style GHCVER=8.0.2 STACK_YAML=stack.yaml
+      compiler: ": #stack 8.0.2"
+      addons: {apt: {packages: [ghc-8.0.2], sources: [hvr-ghc]}}
 
   allow_failures:
-    - env: BUILD=stack STACK_YAML=stack.yaml
+    - env: BUILD=stack STACK_YAML=stack-7.10.yaml
       compiler: ": #stack 7.10.3 osx"
+      os: osx
+
+    - env: BUILD=stack GHCVER=8.0.2 STACK_YAML=stack.yaml
+      compiler: ": #stack 8.0.2 osx"
       os: osx
 
 # Note: the distinction between `before_install` and `install` is not important.
@@ -69,10 +73,12 @@ before_install:
 
 install:
  - echo "$(ghc --version) [$(ghc --print-project-git-commit-id 2> /dev/null || echo '?')]"
+ # Note: we build store by itself below due to high memory usage
  - case "$BUILD" in
      style)
-       stack --no-terminal install hlint;;
+       stack --system-ghc --no-terminal install hlint;;
      stack)
+       stack --no-terminal build store;
        stack --no-terminal test --only-dependencies;;
      cabal)
        cabal --version;
@@ -81,16 +87,18 @@ install:
        echo "stack is located at $(which stack)";
        stack --version;
        rm -f $(stack --compiler=ghc-$GHCVER path --dist-dir)/stack-*.tar.gz &&
-       stack --compiler=ghc-$GHCVER sdist --pvp-bounds=both &&
-       tar xf $(stack --compiler=ghc-$GHCVER path --dist-dir)/stack-*.tar.gz --wildcards --strip-components=1 '*/stack.cabal' &&
+       stack --system-ghc --compiler=ghc-$GHCVER sdist --pvp-bounds=both &&
+       tar xf $(stack --system-ghc --compiler=ghc-$GHCVER path --dist-dir)/stack-*.tar.gz --wildcards --strip-components=1 '*/stack.cabal' &&
        cabal install --only-dependencies --enable-tests --enable-benchmarks --force-reinstalls --ghc-options=-O0 --reorder-goals --max-backjumps=-1;;
    esac
 
 script:
  - set -e; case "$BUILD" in
      style)
-       hlint src/ test/ --cpp-simple --hint=HLint.hs;
-       stack --no-terminal build --pedantic;;
+       hlint src/ --hint=HLint.hs;
+       hlint src/ --cpp-define=WINDOWS=1 --hint=HLint.hs;
+       hlint test/ --cpp-simple --hint=HLint.hs;
+       stack --system-ghc --no-terminal build --pedantic;;
      stack)
        stack --no-terminal test --haddock --no-haddock-deps --ghc-options="-Werror";;
      cabal)

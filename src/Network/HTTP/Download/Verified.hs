@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE CPP                   #-}
 {-# LANGUAGE DeriveDataTypeable    #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -28,34 +29,27 @@ import qualified    Data.Conduit.List as CL
 import qualified    Data.Text as Text
 import qualified    Data.Text.Encoding as Text
 
-import              Control.Applicative
 import              Control.Monad
-import              Control.Monad.Catch
-import              Control.Monad.IO.Class
-import              Control.Monad.Logger (logDebug, MonadLogger)
+import              Control.Monad.Catch (Handler (..)) -- would be nice if retry exported this itself
+import              Stack.Prelude hiding (Handler (..))
 import              Control.Retry (recovering,limitRetries,RetryPolicy,constantDelay)
-import "cryptohash" Crypto.Hash
+import              Crypto.Hash
 import              Crypto.Hash.Conduit (sinkHash)
-import              Data.Byteable (toBytes)
-import              Data.ByteString (ByteString)
+import              Data.ByteArray as Mem (convert)
+import              Data.ByteArray.Encoding as Mem (convertToBase, Base(Base16))
 import              Data.ByteString.Char8 (readInteger)
 import              Data.Conduit
 import              Data.Conduit.Binary (sourceHandle, sinkHandle)
-import              Data.Foldable (traverse_,for_)
-import              Data.Monoid
-import              Data.String
 import              Data.Text.Encoding (decodeUtf8With)
 import              Data.Text.Encoding.Error (lenientDecode)
-import              Data.Typeable (Typeable)
 import              GHC.IO.Exception (IOException(..),IOErrorType(..))
 import              Network.HTTP.Client (getUri, path)
 import              Network.HTTP.Simple (Request, HttpException, httpSink, getResponseHeaders)
 import              Network.HTTP.Types.Header (hContentLength, hContentMD5)
 import              Path
-import              Prelude -- Fix AMP warning
 import              System.Directory
-import              System.FilePath ((<.>))
-import              System.IO
+import qualified    System.FilePath as FP ((<.>))
+import              System.IO (hFileSize)
 
 -- | A request together with some checks to perform.
 data DownloadRequest = DownloadRequest
@@ -116,7 +110,7 @@ instance Show VerifiedDownloadException where
     show (WrongDigest req algo expected actual) =
         "Download expectation failure: content hash (" ++ algo ++  ")\n"
         ++ "Expected: " ++ displayCheckHexDigest expected ++ "\n"
-        ++ "Actual:   " ++ show actual ++ "\n"
+        ++ "Actual:   " ++ actual ++ "\n"
         ++ "For: " ++ show (getUri req)
 
 instance Exception VerifiedDownloadException
@@ -153,8 +147,8 @@ sinkCheckHash :: MonadThrow m
 sinkCheckHash req HashCheck{..} = do
     digest <- sinkHashUsing hashCheckAlgorithm
     let actualDigestString = show digest
-    let actualDigestHexByteString = digestToHexByteString digest
-    let actualDigestBytes = toBytes digest
+    let actualDigestHexByteString = Mem.convertToBase Mem.Base16 digest
+    let actualDigestBytes = Mem.convert digest
 
     let passedCheck = case hashCheckHexDigest of
           CheckHexDigestString s -> s == actualDigestString
@@ -187,15 +181,17 @@ hashChecksToZipSink :: MonadThrow m => Request -> [HashCheck] -> ZipSink ByteStr
 hashChecksToZipSink req = traverse_ (ZipSink . sinkCheckHash req)
 
 -- 'Control.Retry.recovering' customized for HTTP failures
-recoveringHttp :: (MonadMask m, MonadIO m)
+recoveringHttp :: MonadUnliftIO m
                => RetryPolicy -> m a -> m a
 recoveringHttp retryPolicy =
 #if MIN_VERSION_retry(0,7,0)
-    recovering retryPolicy handlers . const
+    helper $ recovering retryPolicy handlers . const
 #else
-    recovering retryPolicy handlers
+    helper $ recovering retryPolicy handlers
 #endif
   where
+    helper wrapper action = withRunInIO $ \run -> wrapper (run action)
+
     handlers = [const $ Handler alwaysRetryHttp,const $ Handler retrySomeIO]
 
     alwaysRetryHttp :: Monad m => HttpException -> m Bool
@@ -242,7 +238,7 @@ verifiedDownload DownloadRequest{..} destpath progressSink = do
         if p then m >> return True else return False
 
     fp = toFilePath destpath
-    fptmp = fp <.> "tmp"
+    fptmp = fp FP.<.> "tmp"
     dir = toFilePath $ parent destpath
 
     getShouldDownload = do
@@ -260,7 +256,7 @@ verifiedDownload DownloadRequest{..} destpath progressSink = do
           `catch` \(_ :: VerifyFileException) -> return False)
           `catch` \(_ :: VerifiedDownloadException) -> return False
 
-    checkExpectations = bracket (openFile fp ReadMode) hClose $ \h -> do
+    checkExpectations = withBinaryFile fp ReadMode $ \h -> do
         for_ drLengthCheck $ checkFileSizeExpectations h
         sourceHandle h $$ getZipSink (hashChecksToZipSink drRequest drHashChecks)
 

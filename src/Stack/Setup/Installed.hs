@@ -1,4 +1,6 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -21,37 +23,27 @@ module Stack.Setup.Installed
     , tempInstallDir
     ) where
 
-import           Control.Applicative
-import           Control.Monad.Catch
-import           Control.Monad.IO.Class (MonadIO, liftIO)
-import           Control.Monad.Logger
-import           Control.Monad.Reader (MonadReader, asks)
-import           Control.Monad.Trans.Control
+import           Stack.Prelude
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as S8
 import           Data.List hiding (concat, elem, maximumBy)
-import           Data.Maybe
-import           Data.Monoid
-import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Distribution.System (Platform (..))
 import qualified Distribution.System as Cabal
-import           GHC.Generics (Generic)
 import           Generics.Deriving.Monoid (mappenddefault, memptydefault)
 import           Path
 import           Path.IO
-import           Prelude hiding (concat, elem) -- Fix AMP warning
 import           Stack.Types.Compiler
 import           Stack.Types.Config
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT
 import           Stack.Types.Version
 import           System.Process.Read
 
 data Tool
     = Tool PackageIdentifier -- ^ e.g. ghc-7.8.4, msys2-20150512
-    | ToolGhcjs CompilerVersion -- ^ e.g. ghcjs-0.1.0_ghc-7.10.2
+    | ToolGhcjs (CompilerVersion 'CVActual) -- ^ e.g. ghcjs-0.1.0_ghc-7.10.2
 
 toolString :: Tool -> String
 toolString (Tool ident) = packageIdentifierString ident
@@ -72,13 +64,13 @@ markInstalled :: (MonadIO m, MonadThrow m)
               -> m ()
 markInstalled programsPath tool = do
     fpRel <- parseRelFile $ toolString tool ++ ".installed"
-    liftIO $ writeFile (toFilePath $ programsPath </> fpRel) "installed"
+    liftIO $ B.writeFile (toFilePath $ programsPath </> fpRel) "installed"
 
-unmarkInstalled :: (MonadIO m, MonadCatch m)
+unmarkInstalled :: MonadIO m
                 => Path Abs Dir
                 -> Tool
                 -> m ()
-unmarkInstalled programsPath tool = do
+unmarkInstalled programsPath tool = liftIO $ do
     fpRel <- parseRelFile $ toolString tool ++ ".installed"
     ignoringAbsence (removeFile $ programsPath </> fpRel)
 
@@ -95,15 +87,20 @@ listInstalled programsPath = do
         x <- T.stripSuffix ".installed" $ T.pack $ toFilePath $ filename fp
         parseToolText x
 
-getCompilerVersion :: (MonadLogger m, MonadCatch m, MonadBaseControl IO m, MonadIO m)
-              => EnvOverride -> WhichCompiler -> m CompilerVersion
+getCompilerVersion
+  :: HasLogFunc env
+  => EnvOverride
+  -> WhichCompiler
+  -> RIO env (CompilerVersion 'CVActual)
 getCompilerVersion menv wc =
     case wc of
         Ghc -> do
             $logDebug "Asking GHC for its version"
             bs <- readProcessStdout Nothing menv "ghc" ["--numeric-version"]
             let (_, ghcVersion) = versionFromEnd bs
-            GhcVersion <$> parseVersion (T.decodeUtf8 ghcVersion)
+            x <- GhcVersion <$> parseVersion (T.decodeUtf8 ghcVersion)
+            $logDebug $ "GHC version is: " <> compilerVersionText x
+            return x
         Ghcjs -> do
             $logDebug "Asking GHCJS for its version"
             -- Output looks like
@@ -118,11 +115,9 @@ getCompilerVersion menv wc =
     isValid c = c == '.' || ('0' <= c && c <= '9')
 
 -- | Binary directories for the given installed package
-extraDirs :: (StackM env m, HasConfig env)
-          => Tool
-          -> m ExtraDirs
+extraDirs :: HasConfig env => Tool -> RIO env ExtraDirs
 extraDirs tool = do
-    config <- asks getConfig
+    config <- view configL
     dir <- installDir (configLocalPrograms config) tool
     case (configPlatform config, toolNameString tool) of
         (Platform _ Cabal.Windows, isGHC -> True) -> return mempty
@@ -142,6 +137,7 @@ extraDirs tool = do
                 ]
             , edLib =
                 [ dir </> $(mkRelDir "mingw32") </> $(mkRelDir "lib")
+                , dir </> $(mkRelDir "mingw32") </> $(mkRelDir "bin")
                 ]
             }
         (Platform Cabal.X86_64 Cabal.Windows, "msys2") -> return mempty
@@ -155,6 +151,7 @@ extraDirs tool = do
                 ]
             , edLib =
                 [ dir </> $(mkRelDir "mingw64") </> $(mkRelDir "lib")
+                , dir </> $(mkRelDir "mingw64") </> $(mkRelDir "bin")
                 ]
             }
         (_, isGHC -> True) -> return mempty
@@ -188,13 +185,13 @@ installDir :: (MonadReader env m, MonadThrow m)
            -> Tool
            -> m (Path Abs Dir)
 installDir programsDir tool = do
-    reldir <- parseRelDir $ toolString tool
-    return $ programsDir </> reldir
+    relativeDir <- parseRelDir $ toolString tool
+    return $ programsDir </> relativeDir
 
 tempInstallDir :: (MonadReader env m, MonadThrow m)
            => Path Abs Dir
            -> Tool
            -> m (Path Abs Dir)
 tempInstallDir programsDir tool = do
-    reldir <- parseRelDir $ toolString tool ++ ".temp"
-    return $ programsDir </> reldir
+    relativeDir <- parseRelDir $ toolString tool ++ ".temp"
+    return $ programsDir </> relativeDir

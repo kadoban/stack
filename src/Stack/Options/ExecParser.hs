@@ -1,8 +1,11 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stack.Options.ExecParser where
 
-import           Data.Monoid.Extra
 import           Options.Applicative
 import           Options.Applicative.Builder.Extra
+import           Options.Applicative.Args
+import           Stack.Options.Completion
+import           Stack.Prelude
 import           Stack.Types.Config
 
 -- | Parser for exec command
@@ -13,7 +16,7 @@ execOptsParser mcmd =
         <*> eoArgsParser
         <*> execOptsExtraParser
   where
-    eoCmdParser = ExecCmd <$> strArgument (metavar "CMD")
+    eoCmdParser = ExecCmd <$> strArgument (metavar "CMD" <> completer projectExeCompleter)
     eoArgsParser = many (strArgument (metavar "-- ARGS (e.g. stack ghc -- X.hs -o x)"))
 
 evalOptsParser :: String -- ^ metavar
@@ -32,6 +35,7 @@ execOptsExtraParser = eoPlainParser <|>
                       ExecOptsEmbellished
                          <$> eoEnvSettingsParser
                          <*> eoPackagesParser
+                         <*> eoRtsOptionsParser
   where
     eoEnvSettingsParser :: Parser EnvSettings
     eoEnvSettingsParser = EnvSettings
@@ -49,8 +53,13 @@ execOptsExtraParser = eoPlainParser <|>
     eoPackagesParser :: Parser [String]
     eoPackagesParser = many (strOption (long "package" <> help "Additional packages that must be installed"))
 
+    eoRtsOptionsParser :: Parser [String]
+    eoRtsOptionsParser = concat <$> many (argsOption
+        ( long "rts-options"
+        <> help "Explicit RTS options to pass to application"
+        <> metavar "RTSFLAG"))
+
     eoPlainParser :: Parser ExecOptsExtra
     eoPlainParser = flag' ExecOptsPlain
                           (long "plain" <>
                            help "Use an unmodified environment (only useful with Docker)")
-

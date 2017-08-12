@@ -5,19 +5,20 @@ the stack.yaml file. Note that this page is likely to be both *incomplete* and
 sometimes *inaccurate*. If you see such cases, please update the page, and if
 you're not sure how, open an issue labeled "question".
 
-The stack.yaml configuration options break down into [project-specific](#project-config) options in:
+The stack.yaml configuration options break down into [project-specific](#project-specific-config) options in:
 
 - `<project dir>/stack.yaml`
 
-and [non-project-specific](#non-project-config) options in:
+and [non-project-specific](#non-project-specific-config) options in:
 
 - `/etc/stack/config.yaml` -- for system global non-project default options
 -  `~/.stack/config.yaml` -- for user non-project default options
 - The project file itself may also contain non-project specific options
 
 *Note:* When stack is invoked outside a stack project it will source project
-specific options from `~/.stack/global/stack.yaml`.  Options in this file will
-be ignored for a project with its own `<project dir>/stack.yaml`.
+specific options from `~/.stack/global-project/stack.yaml`. When stack is
+invoked inside a stack project, only options from `<project dir>/stack.yaml` are
+used, and `~/.stack/global-project/stack.yaml` is ignored.
 
 ## Project-specific config
 
@@ -26,7 +27,7 @@ project, not in the user or global config files.
 
 > Note: We define **project** to mean a directory that contains a `stack.yaml`
 > file, which specifies how to build a set of packages. We define **package** to
-> be a package with a `.cabal` file.
+> be a package with a `.cabal` file or Hpack `package.yaml` file.
 
 In your project-specific options, you specify both **which local packages** to
 build and **which dependencies to use** when building these packages. Unlike the
@@ -40,145 +41,13 @@ it will be used even if you're using a snapshot that specifies a particular
 version. Similarly, `extra-deps` will shadow the version specified in the
 resolver.
 
-### packages
-
-The `packages` section lists all local (project) packages. The term  _local
-package_ should be differentiated from a _dependency package_. A local package
-is something that you are developing as part of the project. Whereas a
-dependency package is an external package that your project depends on.
-
-In its simplest usage, it will be a list of directories or HTTP(S) URLs to a
-tarball or a zip. For example:
-
-```yaml
-packages:
-  - .
-  - dir1/dir2
-  - https://example.com/foo/bar/baz-0.0.2.tar.gz
-```
-
-Each package directory or location specified must have a valid cabal file
-present. Note that the subdirectories of the directory are not searched for
-cabal files. Subdirectories will have to be specified as independent items in
-the list of packages.
-
-When the `packages` field is not present, it defaults to looking for a package
-in the project's root directory:
-
-```yaml
-packages:
-  - .
-```
-#### Complex package locations (`location`)
-
-More complex package locations can be specified in a key-value format with
-`location` as a mandatory key.  In addition to `location` some optional
-key-value pairs can be specified to include specific subdirectories or to
-specify package attributes as descibed later in this section.
-
-In its simplest form a `location` key can have a single value in the same way
-as described above for single value items. Alternativel it can have key-value
-pairs as subfields to describe a git or mercurial repository location. For
-example:
-
-```yaml
-packages:
-- location: .
-- location: dir1/dir2
-- location: https://example.com/foo/bar/baz-0.0.2.tar.gz
-- location: http://github.com/yesodweb/wai/archive/2f8a8e1b771829f4a8a77c0111352ce45a14c30f.zip
-- location:
-    git: git@github.com:commercialhaskell/stack.git
-    commit: 6a86ee32e5b869a877151f74064572225e1a0398
-- location:
-    hg: https://example.com/hg/repo
-    commit: da39a3ee5e6b4b0d3255bfef95601890afd80709
-```
-
-Note: it is highly recommended that you only use SHA1 values for a Git or
-Mercurial commit. Other values may work, but they are not officially supported,
-and may result in unexpected behavior (namely, stack will not automatically
-pull to update to new versions).
-
-A `location` key can be accompanied by a `subdirs` key to look for cabal files
-in a list of subdirectories as well in addition to the top level directory.
-
-This could be useful for mega-repos like
-[wai](https://github.com/yesodweb/wai/) or
-[digestive-functors](https://github.com/jaspervdj/digestive-functors).
-
-The `subdirs` key can have multiple nested series items specifying a list of
-subdirectories.  For example:
-```yaml
-packages:
-- location: .
-  subdirs:
-  - subdir1
-  - subdir2
-- location:
-    git: git@github.com:yesodweb/wai
-    commit: 2f8a8e1b771829f4a8a77c0111352ce45a14c30f
-  subdirs:
-  - auto-update
-  - wai
-- location: http://github.com/yesodweb/wai/archive/2f8a8e1b771829f4a8a77c0111352ce45a14c30f.zip
-  subdirs:
-  - auto-update
-  - wai
-```
-
-#### Local dependency packages (`extra-dep`)
-A `location` key can be accompanied by an `extra-dep` key.  When the
-`extra-dep` key is set to `true` it indicates that the package should be
-treated in the same way as a dependency package and not as part of the project.
-This means the following:
-* A _dependency package_ is built only if a user package or its dependencies
-  depend on it. Note that a regular _project package_ is built anyway even if
-  no other package depends on it.
-* Its test suites and benchmarks will not be run.
-* It will not be directly loaded in ghci when `stack ghci` is run. This is
-  important because if you specify huge dependencies as project packages then
-  ghci will have a nightmare loading everything.
-
-This is especially useful when you are tweaking upstream packages or want to
-use latest versions of the upstream packages which are not yet on Hackage or
-Stackage.
-
-For example:
-```yaml
-packages:
-- location: .
-- location: vendor/binary
-  extra-dep: true
-- location:
-    git: git@github.com:yesodweb/wai
-    commit: 2f8a8e1b771829f4a8a77c0111352ce45a14c30f
-  subdirs:
-  - auto-update
-  - wai
-  extra-dep: true
-```
-
-### extra-deps
-
-This is a list of package identifiers for additional packages from upstream to
-be included. This is usually used to augment an LTS Haskell or Stackage Nightly
-snapshot with a package that is not present or is at an different version than you
-wish to use.
-
-```yaml
-extra-deps:
-- acme-missiles-0.3
-```
-
-Note that the `extra-dep` attribute in the `packages` section as described in
-an earlier section is used for non-index local or remote packages while the
-`extra-deps` section is for packages to be automatically pulled from an index
-like Hackage.
-
 ### resolver
 
-Specifies how dependencies are resolved. There are currently four resolver types:
+Specifies which snapshot is to be used for this project. A snapshot
+defines a GHC version, a number of packages available for
+installation, and various settings like build flags. It is called a
+resolver since a snapshot states how dependencies are resolved. There
+are currently four resolver types:
 
 * LTS Haskell snapshots, e.g. `resolver: lts-2.14`
 * Stackage Nightly snapshot, e.g. `resolver: nightly-2015-06-16`
@@ -190,6 +59,194 @@ Specifies how dependencies are resolved. There are currently four resolver types
 Each of these resolvers will also determine what constraints are placed on the
 compiler version. See the [compiler-check](#compiler-check) option for some
 additional control over compiler version.
+
+### packages and extra-deps
+
+_NOTE_ The contents of this section have changed significantly since
+extensible snapshots were implemented (see:
+[writeup](https://www.fpcomplete.com/blog/2017/07/stacks-new-extensible-snapshots)
+and
+[PR #3249](https://github.com/commercialhaskell/stack/pull/3249)). Most
+old syntax is still supported with newer versions of Stack, but will
+not be documented here. Instead, this section contains the recommended
+syntax as of Stack v1.6.0.
+
+There are two types of packages that can be defined in your
+`stack.yaml` file:
+
+* __Project packages__, those which you are actually working on in
+  your current project. These are local file paths in your project
+  directory.
+* __Extra dependencies__, which are packages provided locally on top
+  of the snapshot definition of available packages. These can come
+  from Hackage (or an alternative package index you've defined, see
+  [package-indices](#package-indices)), an HTTP(S) or local archive, a
+  Git or Mercurial repository, or a local file path.
+
+These two sets of packages are both installed into your local package
+database within your project. However, beyond that, they are
+completely different:
+
+* Project packages will be built by default with a `stack build`
+  without specific targets. Extra dependencies will only be built if
+  they are depended upon.
+* Test suites and benchmarks may be run for project packages. They are
+  never run for extra dependencies.
+
+The `packages` key is a simple list of file paths, which will be
+treated as relative to the directory containing your `stack.yaml`
+file. For example:
+
+```yaml
+packages:
+- .
+- dir1/dir2
+```
+
+Each package directory or location specified must have a valid cabal
+file or hpack `package.yaml` file present. Note that the
+subdirectories of the directory are not searched for cabal
+files. Subdirectories will have to be specified as independent items
+in the list of packages.
+
+When the `packages` field is not present, it defaults to looking for a package
+in the project's root directory:
+
+```yaml
+packages:
+- .
+```
+
+The `extra-deps` key is given a list of all extra dependencies. If
+omitted, it is taken as the empty list, e.g.:
+
+```yaml
+extra-deps: []
+```
+
+It supports four different styles of values:
+
+#### Package index
+
+Packages can be stated by a name/version combination, which will be
+looked up in the package index (by default, Hackage). The basic syntax
+for this is:
+
+```yaml
+extra-deps:
+- acme-missiles-0.3
+```
+
+Using this syntax, the most recent Cabal file revision available will
+be used. For more reproducibility of builds, it is recommended to
+state the SHA256 hash of the cabal file contents as well, like this:
+
+```yaml
+extra-deps:
+- acme-missiles-0.3@sha256:2ba66a092a32593880a87fb00f3213762d7bca65a687d45965778deb8694c5d1
+```
+
+Or a specific revision number, with `0` being the original file:
+
+```yaml
+extra-deps:
+- acme-missiles-0.3@rev:0
+```
+
+Note that specifying via SHA256 is slightly more resilient in that it
+does not rely on correct ordering in the package index, while revision
+number is likely simpler to use. In practice, both should guarantee
+equally reproducible build plans.
+
+If unspecified, `subdirs` defaults to `['.']` (i.e. look only in the top-level
+directory).  Note that if you specify a value of `subdirs`, then `'.'` is _not_
+included by default and needs to be explicitly specified if a required package
+is found in the top-level directory of the repository.
+
+#### Local file path
+
+Like `packages`, local file paths can be used in `extra-deps`, and
+will be relative to the directory containing the `stack.yaml` file.
+
+```yaml
+extra-deps:
+- vendor/somelib
+```
+
+Note that if a local directory can be parsed as a package identifier,
+Stack will treat it as a package identifier. In other words, if you
+have a local directory named `foo-1.2.3`, instead of:
+
+```yaml
+extra-deps:
+- foo-1.2.3
+```
+
+You should use the following to be explicit:
+
+```yaml
+extra-deps:
+- ./foo-1.2.3
+```
+
+#### Git and Mercurial repos
+
+You can give a Git or Mercurial repo at a specific commit, and Stack
+will clone that repo.
+
+```yaml
+extra-deps:
+- git: git@github.com:commercialhaskell/stack.git
+  commit: 6a86ee32e5b869a877151f74064572225e1a0398
+- hg: https://example.com/hg/repo
+  commit: da39a3ee5e6b4b0d3255bfef95601890afd80709
+```
+
+__NOTE__ It is highly recommended that you only use SHA1 values for a
+Git or Mercurial commit. Other values may work, but they are not
+officially supported, and may result in unexpected behavior (namely,
+Stack will not automatically pull to update to new versions).
+
+A common practice in the Haskell world is to use "megarepos", or
+repositories with multiple packages in various subdirectories. Some
+common examples include [wai](https://github.com/yesodweb/wai/) and
+[digestive-functors](https://github.com/jaspervdj/digestive-functors). To
+support this, you may also specify `subdirs` for repositories, e.g.:
+
+```yaml
+extra-deps:
+- git: git@github.com:yesodweb/wai
+  commit: 2f8a8e1b771829f4a8a77c0111352ce45a14c30f
+  subdirs:
+  - auto-update
+  - wai
+```
+
+If unspecified, `subdirs` defaults to `subdirs: [.]`, or looking for a
+package in the root of the repo.
+
+#### Archives (HTTP(S) or local filepath)
+
+This one's pretty straightforward: you can use HTTP and HTTPS URLs and
+local filepaths referring to either tarballs or ZIP files.
+
+__NOTE__ Stack assumes that these files never change after downloading
+to avoid needing to make an HTTP request on each build.
+
+```yaml
+extra-deps:
+- https://example.com/foo/bar/baz-0.0.2.tar.gz
+- archive: http://github.com/yesodweb/wai/archive/2f8a8e1b771829f4a8a77c0111352ce45a14c30f.zip
+  subdirs:
+  - wai
+  - warp
+- archive: ../acme-missiles-0.3.tar.gz
+  sha256: e563d8b524017a06b32768c4db8eff1f822f3fb22a90320b7e414402647b735b
+```
+
+Note that HTTP(S) URLs also support `subdirs` like repos to allow for
+archives of megarepos. In order to leverage this, use `location:
+http://...`.
 
 ### flags
 
@@ -206,8 +263,8 @@ Packages that come from the snapshot global database are not affected.
 
 ### image
 
-The image settings are used for the creation of container images using `stack
-image container`, e.g.
+The image settings are used for the creation of container images using
+`stack image container`, e.g.
 
 ```yaml
 image:
@@ -223,6 +280,29 @@ of the image using `name` (otherwise it defaults to the same as your project).
 You can also specify `entrypoints`. By default all your executables are placed
 in `/usr/local/bin`, but you can specify a list using `executables` to only add
 some.
+
+When you specify `entrypoints`, multiple containers will be built:  a project
+container, and one container for each entrypoint.
+
+For example the following configuration:
+
+```yaml
+image:
+  containers:
+  - name: myproject
+    base: fpco/stack-run
+    add:
+      production/app-backend/conf/: /etc/app-backend
+    entrypoints:
+    - app-backend
+```
+
+will build one container tagged `myproject:latest` which contains the project 
+including the `/etc/app-backend` configuration data.
+
+Another container tagged `myproject-app-backend:latest` based on the `myproject:latest`
+will additionally contain the logic for starting the `app-backend` entrypoint.
+
 
 ### user-message
 
@@ -291,18 +371,33 @@ package-indices:
 - name: Hackage
   download-prefix: https://s3.amazonaws.com/hackage.fpcomplete.com/package/
 
-  # at least one of the following must be present
-  git: https://github.com/commercialhaskell/all-cabal-hashes.git
+  # HTTP location of the package index
   http: https://s3.amazonaws.com/hackage.fpcomplete.com/00-index.tar.gz
 
+  # Or, if using Hackage Security below, give the root URL:
+  http: https://s3.amazonaws.com/hackage.fpcomplete.com/
+
   # optional fields, both default to false
-  gpg-verify: false
   require-hashes: false
+
+  # Starting with stack 1.4, we default to using Hackage Security
+  hackage-security:
+    keyids: ["deadbeef", "12345"] # list of all approved keys
+    key-threshold: 3 # number of keys required
 ```
 
 One thing you should be aware of: if you change the contents of package-version
 combination by setting a different package index, this *can* have an effect on
 other projects by installing into your shared snapshot database.
+
+Note that older versions of Stack supported Git-based indices. This feature has since been removed. A line such as:
+
+```yaml
+git: https://github.com/commercialhaskell/all-cabal-hashes.git
+gpg-verify: false
+```
+
+Will now be ignored.
 
 ### system-ghc
 
@@ -318,8 +413,9 @@ system-ghc: true
 
 ### install-ghc
 
-Whether or not to automatically install GHC when necessary. Default is `false`,
-which means stack will prompt you to run `stack setup` as needed.
+Whether or not to automatically install GHC when necessary. Since
+Stack 1.5.0, the default is `true`, which means Stack will not ask you
+before downloading and installing GHC.
 
 ### skip-ghc-check
 
@@ -403,14 +499,29 @@ Allows specifying per-package and global GHC options:
 ```yaml
 ghc-options:
     # All packages
-    "*": -Wall
+    "$locals": -Wall
+    "$targets": -Werror
+    "$everything": -O2
     some-package: -DSOME_CPP_FLAG
 ```
 
-Caveat emptor: setting options like this will affect your snapshot packages,
-which can lead to unpredictable behavior versus official Stackage snapshots.
-This is in contrast to the `ghc-options` command line flag, which will only
-affect the packages specified by the [`apply-ghc-options` option](yaml_configuration.md#apply-ghc-options).
+Since 1.6.0, setting a GHC options for a specific package will
+automatically promote it to a local package (much like setting a
+custom package flag). However, setting options via `$everything` on all flags
+will not do so (see
+[Github discussion](https://github.com/commercialhaskell/stack/issues/849#issuecomment-320892095)
+for reasoning). This can lead to unpredicable behavior by affecting
+your snapshot packages.
+
+The behavior of the `$locals`, `$targets`, and `$everything` special
+keys mirrors the behavior for the
+[`apply-ghc-options` setting](#apply-ghc-options), which affects
+command line parameters.
+
+NOTE: Prior to version 1.6.0, the `$locals`, `$targets`, and
+`$everything` keys were not support. Instead, you could use `"*"` for
+the behavior represented now by `$everything`. It is highly
+recommended to switch to the new, more expressive, keys.
 
 ### apply-ghc-options
 
@@ -457,7 +568,7 @@ This option is incompatible with `system-ghc: true`.
 
 ### ghc-build
 
-(Since 1.2.1)
+(Since 1.3.0)
 
 Specify a specialized architecture bindist to use.  Normally this is
 determined automatically, but you can override the autodetected value here.
@@ -509,6 +620,16 @@ pvp-bounds: none
 
 For more information, see [the announcement blog post](https://www.fpcomplete.com/blog/2015/09/stack-pvp).
 
+__NOTE__ Since Stack 1.5.0, each of the values listed above supports
+adding `-revision` to the end of each value, e.g. `pvp-bounds:
+both-revision`. This means that, when uploading to Hackage, Stack will
+first upload your tarball with an unmodified `.cabal` file, and then
+upload a cabal file revision with the PVP bounds added. This can be
+useful&mdash;especially combined with the
+[Stackage no-revisions feature](http://www.snoyman.com/blog/2017/04/stackages-no-revisions-field)&mdash;as
+a method to ensure PVP compliance without having to proactively fix
+bounds issues for Stackage maintenance.
+
 ### modify-code-page
 
 (Since 0.1.6)
@@ -539,6 +660,11 @@ explicit-setup-deps:
     "*": true # change the default
     entropy: false # override the new default for one package
 ```
+
+NOTE: since 1.4.0, Stack has support for Cabal's `custom-setup` block
+(introduced in Cabal 1.24). If a `custom-setup` block is provided in a `.cabal`
+file, it will override the setting of `explicit-setup-deps`, and instead rely
+on the stated dependencies.
 
 ### allow-newer
 
@@ -587,7 +713,10 @@ build:
   # NOTE: global usage of haddock can cause build failures when documentation is
   # incorrectly formatted.  This could also affect scripts which use stack.
   haddock: false
-  haddock-arguments: ""
+  haddock-arguments:
+    haddock-args: []      # Additional arguments passed to haddock, --haddock-arguments
+    # haddock-args:
+    # - "--css=/home/user/my-css"
   open-haddocks: false    # --open
   haddock-deps: false     # if unspecified, defaults to true if haddock is set
   haddock-internal: false
@@ -595,11 +724,22 @@ build:
   # These are inadvisable to use in your global configuration, as they make the
   # stack build CLI behave quite differently.
   test: false
-  test-arguments: ""
+  test-arguments:
+    rerun-tests: true   # Rerun successful tests
+    additional-args: [] # --test-arguments
+    # additional-args:
+    # - "--fail-fast"
+    coverage: false
+    no-run-tests: false
   bench: false
-  benchmark-opts: ""
+  benchmark-opts:
+    benchmark-arguments: ""
+    # benchmark-arguments: "--csv bench.csv"
+    no-run-benchmarks: false
   force-dirty: false
   reconfigure: false
+  cabal-verbose: false
+  split-objs: false
 ```
 
 The meanings of these settings correspond directly with the CLI flags of the
@@ -608,7 +748,7 @@ same name. See the [build command docs](build_command.md) and the
 
 ### dump-logs
 
-(Since UNRELEASED)
+(Since 1.3.0)
 
 Control which log output from local non-dependency packages to print to the
 console. By default, Stack will only do this when building a single target
@@ -642,8 +782,8 @@ The 5 parameters are: `author-email`, `author-name`, `category`, `copyright` and
   name of the holder of the copyright on the package and the year(s) from which
   copyright is claimed. For example: `Copyright: (c) 2006-2007 Joe Bloggs`
 * _github-username_ - used to generate `homepage` and `source-repository` in
-  cabal. For instance `github-username: myusername` and `stack new my-project
-  new-template` would result:
+  cabal. For instance `github-username: myusername` and `stack new my-project new-template`
+  would result:
 
 ```yaml
 homepage: http://github.com/myusername/my-project#readme
@@ -660,10 +800,30 @@ templates:
     author-name: Your Name
     author-email: youremail@example.com
     category: Your Projects Category
-    copyright: 'Copyright: (c) 2016 Your Name'
+    copyright: 'Copyright: (c) 2017 Your Name'
     github-username: yourusername
 ```
 
+Additionally, `stack new` can automatically initialize source control repositories
+in the directories it creates.  Source control tools can be specified with the
+`scm-init` option.  At the moment, only `git` is supported.
+
+```yaml
+templates:
+  scm-init: git
+```
+
+### save-hackage-creds
+
+Controls whether, when using `stack upload`, the user's Hackage
+username and password are stored in a local file. Default: true.
+
+```yaml
+save-hackage-creds: true
+```
+
+Since 1.5.0
+  
 # urls
 
 Customize the URLs where `stack` looks for snapshot build plans.

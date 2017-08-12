@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds       #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -11,30 +12,19 @@ module Stack.Build.Installed
     , getInstalled
     ) where
 
-import           Control.Applicative
-import           Control.Arrow
-import           Control.Monad
-import           Control.Monad.Logger
-import           Control.Monad.Reader (asks)
 import           Data.Conduit
 import qualified Data.Conduit.List as CL
 import qualified Data.Foldable as F
-import           Data.Function
 import qualified Data.HashSet as HashSet
 import           Data.List
-import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.Map.Strict as Map
-import           Data.Maybe
-import           Data.Maybe.Extra (mapMaybeM)
-import           Data.Monoid
 import qualified Data.Text as T
 import           Path
-import           Prelude hiding (FilePath, writeFile)
 import           Stack.Build.Cache
 import           Stack.Constants
-import           Stack.GhcPkg
 import           Stack.PackageDump
+import           Stack.Prelude
 import           Stack.Types.Build
 import           Stack.Types.Compiler
 import           Stack.Types.Config
@@ -43,8 +33,8 @@ import           Stack.Types.Package
 import           Stack.Types.PackageDump
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT
 import           Stack.Types.Version
+import           System.Process.Read (EnvOverride)
 
 -- | Options for 'getInstalled'.
 data GetInstalledOpts = GetInstalledOpts
@@ -57,11 +47,12 @@ data GetInstalledOpts = GetInstalledOpts
     }
 
 -- | Returns the new InstalledMap and all of the locally registered packages.
-getInstalled :: (StackM env m, HasEnvConfig env, PackageInstallInfo pii)
+getInstalled :: HasEnvConfig env
              => EnvOverride
              -> GetInstalledOpts
-             -> Map PackageName pii -- ^ does not contain any installed information
-             -> m ( InstalledMap
+             -> Map PackageName PackageSource -- ^ does not contain any installed information
+             -> RIO env
+                  ( InstalledMap
                   , [DumpPackage () () ()] -- globally installed
                   , [DumpPackage () () ()] -- snapshot installed
                   , [DumpPackage () () ()] -- locally installed
@@ -72,11 +63,9 @@ getInstalled menv opts sourceMap = do
     localDBPath <- packageDatabaseLocal
     extraDBPaths <- packageDatabaseExtra
 
-    bconfig <- asks getBuildConfig
-
     mcache <-
         if getInstalledProfiling opts || getInstalledHaddock opts
-            then liftM Just $ loadInstalledCache $ configInstalledCache bconfig
+            then configInstalledCache >>= liftM Just . loadInstalledCache
             else return Nothing
 
     let loadDatabase' = loadDatabase menv opts mcache sourceMap
@@ -92,7 +81,9 @@ getInstalled menv opts sourceMap = do
         loadDatabase' (Just (InstalledTo Local, localDBPath)) installedLibs2
     let installedLibs = M.fromList $ map lhPair installedLibs3
 
-    F.forM_ mcache (saveInstalledCache (configInstalledCache bconfig))
+    F.forM_ mcache $ \cache -> do
+        icache <- configInstalledCache
+        saveInstalledCache icache cache
 
     -- Add in the executables that are installed, making sure to only trust a
     -- listed installation under the right circumstances (see below)
@@ -127,19 +118,18 @@ getInstalled menv opts sourceMap = do
 -- The goal is to ascertain that the dependencies for a package are present,
 -- that it has profiling if necessary, and that it matches the version and
 -- location needed by the SourceMap
-loadDatabase :: (StackM env m, HasEnvConfig env, PackageInstallInfo pii)
+loadDatabase :: HasEnvConfig env
              => EnvOverride
              -> GetInstalledOpts
              -> Maybe InstalledCache -- ^ if Just, profiling or haddock is required
-             -> Map PackageName pii -- ^ to determine which installed things we should include
+             -> Map PackageName PackageSource -- ^ to determine which installed things we should include
              -> Maybe (InstalledPackageLocation, Path Abs Dir) -- ^ package database, Nothing for global
              -> [LoadHelper] -- ^ from parent databases
-             -> m ([LoadHelper], [DumpPackage () () ()])
+             -> RIO env ([LoadHelper], [DumpPackage () () ()])
 loadDatabase menv opts mcache sourceMap mdb lhs0 = do
-    wc <- getWhichCompiler
-    ver <- asks (bcWantedCompiler . getBuildConfig)
+    wc <- view $ actualCompilerVersionL.to whichCompiler
     (lhs1', dps) <- ghcPkgDump menv wc (fmap snd (maybeToList mdb))
-                $ conduitDumpPackage =$ sink ver
+                $ conduitDumpPackage =$ sink
     let ghcjsHack = wc == Ghcjs && isNothing mdb
     lhs1 <- mapMaybeM (processLoadResult mdb ghcjsHack) lhs1'
     let lhs = pruneDeps
@@ -162,20 +152,20 @@ loadDatabase menv opts mcache sourceMap mdb lhs0 = do
             -- Just an optimization to avoid calculating the haddock
             -- values when they aren't necessary
             _ -> CL.map (\dp -> dp { dpHaddock = False })
-    conduitSymbolsCache ver =
+    conduitSymbolsCache =
         case mcache of
-            Just cache | getInstalledSymbols opts -> addSymbols cache ver
+            Just cache | getInstalledSymbols opts -> addSymbols cache
             -- Just an optimization to avoid calculating the debugging
             -- symbol values when they aren't necessary
             _ -> CL.map (\dp -> dp { dpSymbols = False })
     mloc = fmap fst mdb
-    sinkDP ver = conduitProfilingCache
-               =$ conduitHaddockCache
-               =$ conduitSymbolsCache ver
-               =$ CL.map (isAllowed opts mcache sourceMap mloc &&& toLoadHelper mloc)
-               =$ CL.consume
-    sink ver = getZipSink $ (,)
-        <$> ZipSink (sinkDP ver)
+    sinkDP = conduitProfilingCache
+           =$ conduitHaddockCache
+           =$ conduitSymbolsCache
+           =$ CL.map (isAllowed opts mcache sourceMap mloc &&& toLoadHelper mloc)
+           =$ CL.consume
+    sink = getZipSink $ (,)
+        <$> ZipSink sinkDP
         <*> ZipSink CL.consume
 
 processLoadResult :: MonadLogger m
@@ -233,10 +223,9 @@ data Allowed
 -- | Check if a can be included in the set of installed packages or not, based
 -- on the package selections made by the user. This does not perform any
 -- dirtiness or flag change checks.
-isAllowed :: PackageInstallInfo pii
-          => GetInstalledOpts
+isAllowed :: GetInstalledOpts
           -> Maybe InstalledCache
-          -> Map PackageName pii
+          -> Map PackageName PackageSource
           -> Maybe InstalledPackageLocation
           -> DumpPackage Bool Bool Bool
           -> Allowed

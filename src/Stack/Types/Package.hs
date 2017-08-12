@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
@@ -8,60 +9,46 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Stack.Types.Package where
 
-import           Control.DeepSeq
-import           Control.Exception hiding (try,catch)
+import           Stack.Prelude
 import qualified Data.ByteString as S
-import           Data.Data
-import           Data.Function
 import           Data.List
 import qualified Data.Map as M
-import           Data.Map.Strict (Map)
-import           Data.Maybe
-import           Data.Monoid
-import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Store (Store)
 import           Data.Store.Version (VersionConfig)
 import           Data.Store.VersionTagged (storeVersionConfig)
-import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Text.Encoding (encodeUtf8, decodeUtf8)
-import           Data.Word (Word64)
 import           Distribution.InstalledPackageInfo (PError)
 import           Distribution.License (License)
 import           Distribution.ModuleName (ModuleName)
 import           Distribution.Package hiding (Package,PackageName,packageName,packageVersion,PackageIdentifier)
-import           Distribution.PackageDescription (TestSuiteInterface)
+import           Distribution.PackageDescription (TestSuiteInterface, BuildType)
 import           Distribution.System (Platform (..))
-import           GHC.Generics (Generic)
 import           Path as FL
-import           Prelude
-import           Stack.Types.BuildPlan (GitSHA1)
+import           Stack.Types.BuildPlan (PackageLocationIndex)
 import           Stack.Types.Compiler
 import           Stack.Types.Config
 import           Stack.Types.FlagName
 import           Stack.Types.GhcPkgId
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
-import           Stack.Types.StackT (StackM)
 import           Stack.Types.Version
 
 -- | All exceptions thrown by the library.
 data PackageException
-  = PackageInvalidCabalFile (Maybe (Path Abs File)) PError
+  = PackageInvalidCabalFile (PackageLocationIndex FilePath) PError
   | PackageNoCabalFileFound (Path Abs Dir)
   | PackageMultipleCabalFilesFound (Path Abs Dir) [Path Abs File]
   | MismatchedCabalName (Path Abs File) PackageName
   deriving Typeable
 instance Exception PackageException
 instance Show PackageException where
-    show (PackageInvalidCabalFile mfile err) =
-        "Unable to parse cabal file" ++
-        (case mfile of
-            Nothing -> ""
-            Just file -> ' ' : toFilePath file) ++
-        ": " ++
-        show err
+    show (PackageInvalidCabalFile loc err) = concat
+        [ "Unable to parse cabal file for "
+        , show loc
+        , ": "
+        , show err
+        ]
     show (PackageNoCabalFileFound dir) = concat
         [ "Stack looks for packages in the directories configured in"
         , " the 'packages' variable defined in your stack.yaml\n"
@@ -101,7 +88,9 @@ data Package =
           ,packageExes :: !(Set Text)                     -- ^ names of executables
           ,packageOpts :: !GetPackageOpts                 -- ^ Args to pass to GHC.
           ,packageHasExposedModules :: !Bool              -- ^ Does the package have exposed modules?
-          ,packageSimpleType :: !Bool                     -- ^ Does the package of build-type: Simple
+          ,packageBuildType :: !(Maybe BuildType)         -- ^ Package build-type.
+          ,packageSetupDeps :: !(Maybe (Map PackageName VersionRange))
+                                                          -- ^ If present: custom-setup dependencies
           }
  deriving (Show,Typeable)
 
@@ -115,13 +104,14 @@ packageDefinedFlags = M.keysSet . packageDefaultFlags
 -- | Files that the package depends on, relative to package directory.
 -- Argument is the location of the .cabal file
 newtype GetPackageOpts = GetPackageOpts
-    { getPackageOpts :: forall env m. (StackM env m, HasEnvConfig env)
+    { getPackageOpts :: forall env. HasEnvConfig env
                      => SourceMap
                      -> InstalledMap
                      -> [PackageName]
                      -> [PackageName]
                      -> Path Abs File
-                     -> m (Map NamedComponent (Set ModuleName)
+                     -> RIO env
+                          (Map NamedComponent (Set ModuleName)
                           ,Map NamedComponent (Set DotCabalPath)
                           ,Map NamedComponent BuildInfoOpts)
     }
@@ -147,9 +137,10 @@ data CabalFileType
 -- | Files that the package depends on, relative to package directory.
 -- Argument is the location of the .cabal file
 newtype GetPackageFiles = GetPackageFiles
-    { getPackageFiles :: forall m env. (StackM env m, HasEnvConfig env)
+    { getPackageFiles :: forall env. HasEnvConfig env
                       => Path Abs File
-                      -> m (Map NamedComponent (Set ModuleName)
+                      -> RIO env
+                           (Map NamedComponent (Set ModuleName)
                            ,Map NamedComponent (Set DotCabalPath)
                            ,Set (Path Abs File)
                            ,[PackageWarning])
@@ -175,7 +166,8 @@ data PackageConfig =
                 ,packageConfigEnableBenchmarks :: !Bool           -- ^ Are benchmarks enabled?
                 ,packageConfigFlags :: !(Map FlagName Bool)       -- ^ Configured flags.
                 ,packageConfigGhcOptions :: ![Text]               -- ^ Configured ghc options.
-                ,packageConfigCompilerVersion :: !CompilerVersion -- ^ GHC version
+                ,packageConfigCompilerVersion
+                                  :: !(CompilerVersion 'CVActual) -- ^ GHC version
                 ,packageConfigPlatform :: !Platform               -- ^ host platform
                 }
  deriving (Show,Typeable)
@@ -193,23 +185,18 @@ type SourceMap = Map PackageName PackageSource
 -- | Where the package's source is located: local directory or package index
 data PackageSource
     = PSLocal LocalPackage
-    | PSUpstream Version InstallLocation (Map FlagName Bool) [Text] (Maybe GitSHA1)
+    | PSUpstream Version InstallLocation (Map FlagName Bool) [Text] (PackageLocationIndex FilePath) -- FIXME still seems like we could do better... Minimum: rename from Upstream to Dependency and Local to Project
     -- ^ Upstream packages could be installed in either local or snapshot
     -- databases; this is what 'InstallLocation' specifies.
     deriving Show
 
-instance PackageInstallInfo PackageSource where
-    piiVersion (PSLocal lp) = packageVersion $ lpPackage lp
-    piiVersion (PSUpstream v _ _ _ _) = v
+piiVersion :: PackageSource -> Version
+piiVersion (PSLocal lp) = packageVersion $ lpPackage lp
+piiVersion (PSUpstream v _ _ _ _) = v
 
-    piiLocation (PSLocal _) = Local
-    piiLocation (PSUpstream _ loc _ _ _) = loc
-
--- | Datatype which tells how which version of a package to install and where
--- to install it into
-class PackageInstallInfo a where
-    piiVersion :: a -> Version
-    piiLocation :: a -> InstallLocation
+piiLocation :: PackageSource -> InstallLocation
+piiLocation (PSLocal _) = Local
+piiLocation (PSUpstream _ loc _ _ _) = loc
 
 -- | Information on a locally available package of source code
 data LocalPackage = LocalPackage
@@ -246,14 +233,6 @@ data LocalPackage = LocalPackage
     -- ^ all files used by this package
     }
     deriving Show
-
--- | A single, fully resolved component of a package
-data NamedComponent
-    = CLib
-    | CExe !Text
-    | CTest !Text
-    | CBench !Text
-    deriving (Show, Eq, Ord)
 
 renderComponent :: NamedComponent -> S.ByteString
 renderComponent CLib = "lib"

@@ -1,23 +1,24 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Stack.Options.GlobalParser where
 
-import           Control.Monad.Logger              (LogLevel (..))
-import           Data.Monoid.Extra
 import           Options.Applicative
 import           Options.Applicative.Builder.Extra
 import qualified Stack.Docker                      as Docker
 import           Stack.Init
+import           Stack.Prelude
 import           Stack.Options.ConfigParser
 import           Stack.Options.LogLevelParser
 import           Stack.Options.ResolverParser
 import           Stack.Options.Utils
 import           Stack.Types.Config
 import           Stack.Types.Docker
+import           Stack.Types.Runner
 
 -- | Parser for global command-line options.
-globalOptsParser :: GlobalOptsContext -> Maybe LogLevel -> Parser GlobalOptsMonoid
-globalOptsParser kind defLogLevel =
+globalOptsParser :: FilePath -> GlobalOptsContext -> Maybe LogLevel -> Parser GlobalOptsMonoid
+globalOptsParser currentDir kind defLogLevel =
     GlobalOptsMonoid <$>
     optionalFirst (strOption (long Docker.reExecArgName <> hidden <> internal)) <*>
     optionalFirst (option auto (long dockerEntrypointArgName <> hidden <> internal)) <*>
@@ -26,7 +27,7 @@ globalOptsParser kind defLogLevel =
         "time-in-log"
         "inclusion of timings in logs, for the purposes of using diff with logs"
         hide <*>
-    configOptsParser kind <*>
+    configOptsParser currentDir kind <*>
     optionalFirst (abstractResolverOptsParser hide0) <*>
     optionalFirst (compilerOptsParser hide0) <*>
     firstBoolFlags
@@ -36,12 +37,14 @@ globalOptsParser kind defLogLevel =
     optionalFirst (option readColorWhen
         (long "color" <>
          metavar "WHEN" <>
+         completeWith ["always", "never", "auto"] <>
          help "Specify when to use color in output; WHEN is 'always', 'never', or 'auto'" <>
          hide)) <*>
     optionalFirst
         (strOption
             (long "stack-yaml" <>
              metavar "STACK-YAML" <>
+             completer (fileExtCompleter [".yaml"]) <>
              help ("Override project stack.yaml file " <>
                    "(overrides any STACK_YAML environment variable)") <>
              hide))
@@ -61,7 +64,7 @@ globalOptsFromMonoid defaultTerminal GlobalOptsMonoid{..} = GlobalOpts
     , globalCompiler = getFirst globalMonoidCompiler
     , globalTerminal = fromFirst defaultTerminal globalMonoidTerminal
     , globalColorWhen = fromFirst ColorAuto globalMonoidColorWhen
-    , globalStackYaml = getFirst globalMonoidStackYaml }
+    , globalStackYaml = maybe SYLDefault SYLOverride $ getFirst globalMonoidStackYaml }
 
 initOptsParser :: Parser InitOpts
 initOptsParser =
@@ -71,7 +74,8 @@ initOptsParser =
   where
     searchDirs =
       many (textArgument
-              (metavar "DIRS" <>
+              (metavar "DIR" <>
+               completer dirCompleter <>
                help "Directories to include, default is current directory."))
     ignoreSubDirs = switch (long "ignore-subdirs" <>
                            help "Do not search for .cabal files in sub directories")

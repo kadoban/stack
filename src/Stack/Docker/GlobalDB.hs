@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE QuasiQuotes, TemplateHaskell, TypeFamilies, OverloadedStrings,
              GADTs, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving,
              RankNTypes, NamedFieldPuns #-}
@@ -15,20 +16,17 @@ module Stack.Docker.GlobalDB
   ,DockerImageExeId)
   where
 
-import           Control.Exception (IOException,catch,throwIO)
-import           Control.Monad (forM_, when)
 import           Control.Monad.Logger (NoLoggingT)
-import           Control.Monad.Trans.Resource (ResourceT)
+import           Stack.Prelude
 import           Data.List (sortBy, isInfixOf, stripPrefix)
 import           Data.List.Extra (stripSuffix)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import           Data.Time.Clock (UTCTime,getCurrentTime)
 import           Database.Persist
 import           Database.Persist.Sqlite
 import           Database.Persist.TH
-import           Path (toFilePath, parent)
+import           Path (parent)
 import           Path.IO (ensureDir)
 import           Stack.Types.Config
 import           Stack.Types.Docker
@@ -109,7 +107,7 @@ withGlobalDB config action =
                  str' = fromMaybe str $ stripPrefix "user error (" $
                         fromMaybe str $ stripSuffix ")" str
              if "ErrorReadOnly" `isInfixOf` str
-                 then fail $ str' ++
+                 then throwString $ str' ++
                      " This likely indicates that your DB file, " ++
                      toFilePath db ++ ", has incorrect permissions or ownership."
                  else throwIO (ex :: IOException)

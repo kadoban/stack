@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DeriveGeneric #-}
@@ -21,28 +22,18 @@ module Stack.Types.FlagName
   ,mkFlagName)
   where
 
-import           Control.Applicative
-import           Control.DeepSeq (NFData)
-import           Control.Monad.Catch
+import           Stack.Prelude
 import           Data.Aeson.Extended
 import           Data.Attoparsec.Combinators
 import           Data.Attoparsec.Text
 import           Data.Char (isLetter, isDigit, toLower)
-import           Data.Data
-import           Data.Hashable
-import           Data.Map (Map)
-import qualified Data.Map as Map
-import           Data.Store (Store)
-import           Data.Text (Text)
 import qualified Data.Text as T
-import           Data.Text.Binary ()
 import qualified Distribution.PackageDescription as Cabal
-import           GHC.Generics
 import           Language.Haskell.TH
 import           Language.Haskell.TH.Syntax
 
 -- | A parse fail.
-data FlagNameParseFail
+newtype FlagNameParseFail
   = FlagNameParseFail Text
   deriving (Typeable)
 instance Exception FlagNameParseFail
@@ -52,7 +43,7 @@ instance Show FlagNameParseFail where
 -- | A flag name.
 newtype FlagName =
   FlagName Text
-  deriving (Typeable,Data,Generic,Hashable,Store,NFData)
+  deriving (Typeable,Data,Generic,Hashable,Store,NFData,ToJSONKey)
 instance Eq FlagName where
     x == y = compare x y == EQ
 instance Ord FlagName where
@@ -75,6 +66,10 @@ instance FromJSON FlagName where
            fail ("Couldn't parse flag name: " ++ s)
          Just ver -> return ver
 
+instance FromJSONKey FlagName where
+  fromJSONKey = FromJSONKeyTextParser $ \k ->
+    either (fail . show) return $ parseFlagName k
+
 -- | Attoparsec parser for a flag name
 flagNameParser :: Parser FlagName
 flagNameParser =
@@ -91,7 +86,7 @@ flagNameParser =
 mkFlagName :: String -> Q Exp
 mkFlagName s =
   case parseFlagNameFromString s of
-    Nothing -> error ("Invalid flag name: " ++ show s)
+    Nothing -> qRunIO $ throwString ("Invalid flag name: " ++ show s)
     Just pn -> [|pn|]
 
 -- | Convenient way to parse a flag name from a 'Text'.
@@ -125,12 +120,3 @@ toCabalFlagName :: FlagName -> Cabal.FlagName
 toCabalFlagName (FlagName name) =
   let !x = T.unpack name
   in Cabal.FlagName x
-
-instance ToJSON a => ToJSON (Map FlagName a) where
-  toJSON = toJSON . Map.mapKeysWith const flagNameText
-instance FromJSON a => FromJSON (Map FlagName a) where
-    parseJSON val = do
-        m <- parseJSON val
-        fmap Map.fromList $ mapM go $ Map.toList m
-      where
-        go (k, v) = fmap (, v) $ either (fail . show) return $ parseFlagNameFromString k

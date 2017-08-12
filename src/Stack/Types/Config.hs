@@ -1,8 +1,12 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -24,20 +28,20 @@ module Stack.Types.Config
   -- * Main configuration types and classes
   -- ** HasPlatform & HasStackRoot
    HasPlatform(..)
-  ,HasStackRoot(..)
   ,PlatformVariant(..)
   -- ** Config & HasConfig
   ,Config(..)
   ,HasConfig(..)
-  ,askConfig
   ,askLatestSnapshotUrl
   ,explicitSetupDeps
   ,getMinimalEnvOverride
   -- ** BuildConfig & HasBuildConfig
   ,BuildConfig(..)
-  ,bcRoot
-  ,bcWorkDir
-  ,bcWantedCompiler
+  ,LocalPackages(..)
+  ,LocalPackageView(..)
+  ,NamedComponent(..)
+  ,stackYamlL
+  ,projectRootL
   ,HasBuildConfig(..)
   -- ** GHCVariant & HasGHCVariant
   ,GHCVariant(..)
@@ -46,12 +50,9 @@ module Stack.Types.Config
   ,parseGHCVariant
   ,HasGHCVariant(..)
   ,snapshotsDir
-  -- ** Constraint synonym for use with StackMini
-  ,StackMiniM
   -- ** EnvConfig & HasEnvConfig
   ,EnvConfig(..)
   ,HasEnvConfig(..)
-  ,getWhichCompiler
   ,getCompilerPath
   -- * Details
   -- ** ApplyGhcOptions
@@ -64,6 +65,7 @@ module Stack.Types.Config
   ,ConfigMonoid(..)
   ,configMonoidInstallGHCName
   ,configMonoidSystemGHCName
+  ,parseConfigMonoid
   -- ** DumpLogs
   ,DumpLogs(..)
   -- ** EnvSettings
@@ -72,50 +74,41 @@ module Stack.Types.Config
   -- ** GlobalOpts & GlobalOptsMonoid
   ,GlobalOpts(..)
   ,GlobalOptsMonoid(..)
+  ,StackYamlLoc(..)
   ,defaultLogLevel
   -- ** LoadConfig
   ,LoadConfig(..)
-  -- ** PackageEntry & PackageLocation
-  ,PackageEntry(..)
-  ,TreatLikeExtraDep
-  ,PackageLocation(..)
-  ,RemotePackageType(..)
   -- ** PackageIndex, IndexName & IndexLocation
 
   -- Re-exports
   ,PackageIndex(..)
   ,IndexName(..)
   ,indexNameText
-  ,IndexLocation(..)
   -- Config fields
   ,configPackageIndex
+  ,configPackageIndexOld
   ,configPackageIndexCache
+  ,configPackageIndexCacheOld
   ,configPackageIndexGz
   ,configPackageIndexRoot
-  ,configPackageIndexRepo
   ,configPackageTarball
   -- ** Project & ProjectAndConfigMonoid
   ,Project(..)
   ,ProjectAndConfigMonoid(..)
+  ,parseProjectAndConfigMonoid
   -- ** PvpBounds
   ,PvpBounds(..)
+  ,PvpBoundsType(..)
   ,parsePvpBounds
   -- ** ColorWhen
-  ,ColorWhen(..)
   ,readColorWhen
   -- ** SCM
   ,SCM(..)
-  -- ** CustomSnapshot
-  ,CustomSnapshot(..)
-  -- ** GhcOptions
-  ,GhcOptions(..)
-  ,ghcOptionsFor
-  -- ** PackageFlags
-  ,PackageFlags(..)
   -- * Paths
   ,bindirSuffix
   ,configInstalledCache
-  ,configMiniBuildPlanCache
+  ,configLoadedSnapshotCache
+  ,GlobalInfoSource(..)
   ,getProjectWorkDir
   ,docDirSuffix
   ,flagCacheLocal
@@ -131,8 +124,9 @@ module Stack.Types.Config
   ,packageDatabaseLocal
   ,platformOnlyRelDir
   ,platformGhcRelDir
+  ,platformGhcVerOnlyRelDir
   ,useShaPathOnWindows
-  ,getWorkDir
+  ,workDirL
   -- * Command-specific types
   -- ** Eval
   ,EvalOpts(..)
@@ -150,54 +144,66 @@ module Stack.Types.Config
   ,DockerEntrypoint(..)
   ,DockerUser(..)
   ,module X
+  -- * Lens helpers
+  ,wantedCompilerVersionL
+  ,actualCompilerVersionL
+  ,buildOptsL
+  ,globalOptsL
+  ,buildOptsInstallExesL
+  ,buildOptsMonoidHaddockL
+  ,buildOptsMonoidTestsL
+  ,buildOptsMonoidBenchmarksL
+  ,buildOptsMonoidInstallExesL
+  ,buildOptsHaddockL
+  ,globalOptsBuildOptsMonoidL
+  ,packageIndicesL
+  ,stackRootL
+  ,configUrlsL
+  ,cabalVersionL
+  ,whichCompilerL
+  ,envOverrideL
+  ,loadedSnapshotL
+  ,shouldForceGhcColorFlag
+  ,appropriateGhcColorFlag
+  -- * Lens reexport
+  ,view
+  ,to
   ) where
 
-import           Control.Applicative
-import           Control.Arrow ((&&&))
-import           Control.Exception
-import           Control.Monad (liftM, mzero, join)
-import           Control.Monad.Catch (MonadThrow, MonadMask)
-import           Control.Monad.Logger (LogLevel(..), MonadLoggerIO)
-import           Control.Monad.Reader (MonadReader, ask, asks, MonadIO, liftIO)
-import           Control.Monad.Trans.Control
+import           Control.Monad.Writer (tell)
+import           Stack.Prelude
 import           Data.Aeson.Extended
-                 (ToJSON, toJSON, FromJSON, parseJSON, withText, object,
+                 (ToJSON, toJSON, FromJSON, FromJSONKey (..), parseJSON, withText, object,
                   (.=), (..:), (..:?), (..!=), Value(Bool, String),
                   withObjectWarnings, WarningParser, Object, jsonSubWarnings,
-                  jsonSubWarningsT, jsonSubWarningsTT, WithJSONWarnings(..), noJSONWarnings)
-import           Data.Attoparsec.Args
-import           Data.ByteString (ByteString)
+                  jsonSubWarningsT, jsonSubWarningsTT, WithJSONWarnings(..), noJSONWarnings,
+                  FromJSONKeyFunction (FromJSONKeyTextParser))
+import           Data.Attoparsec.Args (parseArgs, EscapingMode (Escaping))
 import qualified Data.ByteString.Char8 as S8
-import           Data.Either (partitionEithers)
-import           Data.IORef (IORef)
 import           Data.List (stripPrefix)
 import           Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
-import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Strict as M
-import           Data.Maybe
-import           Data.Monoid.Extra
-import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Text.Encoding (encodeUtf8)
-import           Data.Typeable
 import           Data.Yaml (ParseException)
 import qualified Data.Yaml as Yaml
+import           Distribution.PackageDescription (GenericPackageDescription)
+import           Distribution.ParseUtils (PError)
 import           Distribution.System (Platform)
 import qualified Distribution.Text
 import           Distribution.Version (anyVersion)
-import           GHC.Generics (Generic)
 import           Generics.Deriving.Monoid (memptydefault, mappenddefault)
-import           Network.HTTP.Client (parseRequest)
+import           Lens.Micro (Lens', lens, _1, _2, to)
 import           Options.Applicative (ReadM)
 import qualified Options.Applicative as OA
 import qualified Options.Applicative.Types as OA
 import           Path
 import qualified Paths_stack as Meta
-import           Stack.Types.BuildPlan (MiniBuildPlan(..), SnapName, renderSnapName)
+import           Stack.Constants
+import           Stack.Types.BuildPlan
 import           Stack.Types.Compiler
 import           Stack.Types.CompilerBuild
 import           Stack.Types.Docker
@@ -208,10 +214,11 @@ import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageIndex
 import           Stack.Types.PackageName
 import           Stack.Types.Resolver
+import           Stack.Types.Runner
 import           Stack.Types.TemplateName
 import           Stack.Types.Urls
 import           Stack.Types.Version
-import           System.FilePath (takeBaseName)
+import qualified System.FilePath as FilePath
 import           System.PosixCompat.Types (UserID, GroupID, FileMode)
 import           System.Process.Read (EnvOverride, findExecutable)
 
@@ -219,8 +226,8 @@ import           System.Process.Read (EnvOverride, findExecutable)
 import           Stack.Types.Config.Build as X
 
 #ifdef mingw32_HOST_OS
-import qualified Crypto.Hash.SHA1 as SHA1
-import qualified Data.ByteString.Base16 as B16
+import           Crypto.Hash (hashWith, SHA1(..))
+import qualified Data.ByteArray.Encoding as Mem (convertToBase, Base(Base16))
 #endif
 
 -- | The top-level Stackage configuration.
@@ -299,9 +306,9 @@ data Config =
          -- ^ How many concurrent jobs to run, defaults to number of capabilities
          ,configOverrideGccPath     :: !(Maybe (Path Abs File))
          -- ^ Optional gcc override path
-         ,configExtraIncludeDirs    :: !(Set (Path Abs Dir))
+         ,configExtraIncludeDirs    :: !(Set FilePath)
          -- ^ --extra-include-dirs arguments
-         ,configExtraLibDirs        :: !(Set (Path Abs Dir))
+         ,configExtraLibDirs        :: !(Set FilePath)
          -- ^ --extra-lib-dirs arguments
          ,configConcurrentTests     :: !Bool
          -- ^ Run test suites concurrently
@@ -310,9 +317,10 @@ data Config =
          -- ^ Parameters for templates.
          ,configScmInit             :: !(Maybe SCM)
          -- ^ Initialize SCM (e.g. git) when creating new projects.
-         ,configGhcOptions          :: !GhcOptions
-         -- ^ Additional GHC options to apply to either all packages (Nothing)
-         -- or a specific package (Just).
+         ,configGhcOptionsByName    :: !(Map PackageName [Text])
+         -- ^ Additional GHC options to apply to specific packages.
+         ,configGhcOptionsByCat     :: !(Map ApplyGhcOptions [Text])
+         -- ^ Additional GHC options to apply to categories of packages
          ,configSetupInfoLocations  :: ![SetupInfoLocation]
          -- ^ Additional SetupInfo (inline or remote) to use to find tools.
          ,configPvpBounds           :: !PvpBounds
@@ -334,13 +342,19 @@ data Config =
          ,configAllowDifferentUser  :: !Bool
          -- ^ Allow users other than the stack root owner to use the stack
          -- installation.
-         ,configPackageCaches       :: !(IORef (Maybe (Map PackageIdentifier (PackageIndex, PackageCache))))
+         ,configPackageCache        :: !(IORef (Maybe (PackageCache PackageIndex)))
          -- ^ In memory cache of hackage index.
          ,configDumpLogs            :: !DumpLogs
          -- ^ Dump logs of local non-dependencies when doing a build.
          ,configMaybeProject        :: !(Maybe (Project, Path Abs File))
          -- ^ 'Just' when a local project can be found, 'Nothing' when stack must
          -- fall back on the implicit global project.
+         ,configAllowLocals         :: !Bool
+         -- ^ Are we allowed to build local packages? The script
+         -- command disallows this.
+         ,configSaveHackageCreds    :: !Bool
+         -- ^ Should we save Hackage credentials to a file?
+         ,configRunner              :: !Runner
          }
 
 -- | Which packages do ghc-options on the command line apply to?
@@ -407,6 +421,7 @@ data ExecOptsExtra
     | ExecOptsEmbellished
         { eoEnvSettings :: !EnvSettings
         , eoPackages :: ![String]
+        , eoRtsOptions :: ![String]
         }
     deriving (Show)
 
@@ -424,11 +439,19 @@ data GlobalOpts = GlobalOpts
     , globalTimeInLog    :: !Bool -- ^ Whether to include timings in logs.
     , globalConfigMonoid :: !ConfigMonoid -- ^ Config monoid, for passing into 'loadConfig'
     , globalResolver     :: !(Maybe AbstractResolver) -- ^ Resolver override
-    , globalCompiler     :: !(Maybe CompilerVersion) -- ^ Compiler override
+    , globalCompiler     :: !(Maybe (CompilerVersion 'CVWanted)) -- ^ Compiler override
     , globalTerminal     :: !Bool -- ^ We're in a terminal?
     , globalColorWhen    :: !ColorWhen -- ^ When to use ansi terminal colors
-    , globalStackYaml    :: !(Maybe FilePath) -- ^ Override project stack.yaml
+    , globalStackYaml    :: !(StackYamlLoc FilePath) -- ^ Override project stack.yaml
     } deriving (Show)
+
+data StackYamlLoc filepath
+    = SYLDefault
+    | SYLOverride !filepath
+    | SYLNoConfig !(Path Abs Dir)
+    -- ^ FilePath is the directory containing the script file, used
+    -- for resolving custom snapshot files.
+    deriving (Show,Functor,Foldable,Traversable)
 
 -- | Parsed global command-line options monoid.
 data GlobalOptsMonoid = GlobalOptsMonoid
@@ -439,7 +462,7 @@ data GlobalOptsMonoid = GlobalOptsMonoid
     , globalMonoidTimeInLog    :: !(First Bool) -- ^ Whether to include timings in logs.
     , globalMonoidConfigMonoid :: !ConfigMonoid -- ^ Config monoid, for passing into 'loadConfig'
     , globalMonoidResolver     :: !(First AbstractResolver) -- ^ Resolver override
-    , globalMonoidCompiler     :: !(First CompilerVersion) -- ^ Compiler override
+    , globalMonoidCompiler     :: !(First (CompilerVersion 'CVWanted)) -- ^ Compiler override
     , globalMonoidTerminal     :: !(First Bool) -- ^ We're in a terminal?
     , globalMonoidColorWhen    :: !(First ColorWhen) -- ^ When to use ansi colors
     , globalMonoidStackYaml    :: !(First FilePath) -- ^ Override project stack.yaml
@@ -453,9 +476,6 @@ instance Monoid GlobalOptsMonoid where
 defaultLogLevel :: LogLevel
 defaultLogLevel = LevelInfo
 
-data ColorWhen = ColorNever | ColorAlways | ColorAuto
-    deriving (Show, Generic)
-
 readColorWhen :: ReadM ColorWhen
 readColorWhen = do
     s <- OA.readerAsk
@@ -468,16 +488,17 @@ readColorWhen = do
 -- | A superset of 'Config' adding information on how to build code. The reason
 -- for this breakdown is because we will need some of the information from
 -- 'Config' in order to determine the values here.
+--
+-- These are the components which know nothing about local configuration.
 data BuildConfig = BuildConfig
     { bcConfig     :: !Config
-    , bcResolver   :: !LoadedResolver
-      -- ^ How we resolve which dependencies to install given a set of
-      -- packages.
-    , bcWantedMiniBuildPlan :: !MiniBuildPlan
-      -- ^ Compiler version wanted for this build
-    , bcPackageEntries :: ![PackageEntry]
+    , bcSnapshotDef :: !SnapshotDef
+      -- ^ Build plan wanted for this build
+    , bcGHCVariant :: !GHCVariant
+      -- ^ The variant of GHC used to select a GHC bindist.
+    , bcPackages :: ![PackageLocation Subdirs]
       -- ^ Local packages
-    , bcExtraDeps  :: !(Map PackageName Version)
+    , bcDependencies :: ![PackageLocationIndex Subdirs]
       -- ^ Extra dependencies specified in configuration.
       --
       -- These dependencies will not be installed to a shared location, and
@@ -488,28 +509,23 @@ data BuildConfig = BuildConfig
       -- ^ Location of the stack.yaml file.
       --
       -- Note: if the STACK_YAML environment variable is used, this may be
-      -- different from bcRoot </> "stack.yaml"
-    , bcFlags      :: !PackageFlags
+      -- different from projectRootL </> "stack.yaml"
+      --
+      -- FIXME MSS 2016-12-08: is the above comment still true? projectRootL
+      -- is defined in terms of bcStackYaml
+    , bcFlags      :: !(Map PackageName (Map FlagName Bool))
       -- ^ Per-package flag overrides
     , bcImplicitGlobal :: !Bool
       -- ^ Are we loading from the implicit global stack.yaml? This is useful
       -- for providing better error messages.
-    , bcGHCVariant :: !GHCVariant
-      -- ^ The variant of GHC used to select a GHC bindist.
     }
 
+stackYamlL :: HasBuildConfig env => Lens' env (Path Abs File)
+stackYamlL = buildConfigL.lens bcStackYaml (\x y -> x { bcStackYaml = y })
+
 -- | Directory containing the project's stack.yaml file
-bcRoot :: BuildConfig -> Path Abs Dir
-bcRoot = parent . bcStackYaml
-
--- | @"'bcRoot'/.stack-work"@
-bcWorkDir :: (MonadReader env m, HasConfig env) => BuildConfig -> m (Path Abs Dir)
-bcWorkDir bconfig = do
-  workDir <- getWorkDir
-  return (bcRoot bconfig </> workDir)
-
-bcWantedCompiler :: BuildConfig -> CompilerVersion
-bcWantedCompiler = mbpCompilerVersion . bcWantedMiniBuildPlan
+projectRootL :: HasBuildConfig env => Getting r env (Path Abs Dir)
+projectRootL = stackYamlL.to parent
 
 -- | Configuration after the environment has been setup.
 data EnvConfig = EnvConfig
@@ -521,28 +537,45 @@ data EnvConfig = EnvConfig
     -- Note that this is not necessarily the same version as the one that stack
     -- depends on as a library and which is displayed when running
     -- @stack list-dependencies | grep Cabal@ in the stack project.
-    ,envConfigCompilerVersion :: !CompilerVersion
+    ,envConfigCompilerVersion :: !(CompilerVersion 'CVActual)
+    -- ^ The actual version of the compiler to be used, as opposed to
+    -- 'wantedCompilerL', which provides the version specified by the
+    -- build plan.
     ,envConfigCompilerBuild :: !CompilerBuild
-    ,envConfigPackagesRef :: !(IORef (Maybe (Map (Path Abs Dir) TreatLikeExtraDep)))
+    ,envConfigPackagesRef :: !(IORef (Maybe LocalPackages))
     -- ^ Cache for 'getLocalPackages'.
+    ,envConfigLoadedSnapshot :: !LoadedSnapshot
+    -- ^ The fully resolved snapshot information.
     }
 
-instance HasBuildConfig EnvConfig where
-    getBuildConfig = envConfigBuildConfig
-instance HasConfig EnvConfig
-instance HasPlatform EnvConfig
-instance HasGHCVariant EnvConfig
-instance HasStackRoot EnvConfig
-class (HasBuildConfig r, HasGHCVariant r) => HasEnvConfig r where
-    getEnvConfig :: r -> EnvConfig
-instance HasEnvConfig EnvConfig where
-    getEnvConfig = id
+data LocalPackages = LocalPackages
+  { lpProject :: !(Map PackageName LocalPackageView)
+  , lpDependencies :: !(Map PackageName (GenericPackageDescription, PackageLocationIndex FilePath))
+  }
+
+-- | A view of a local package needed for resolving components
+data LocalPackageView = LocalPackageView
+    { lpvVersion    :: !Version
+    , lpvRoot       :: !(Path Abs Dir)
+    , lpvCabalFP    :: !(Path Abs File)
+    , lpvComponents :: !(Set NamedComponent)
+    , lpvGPD        :: !GenericPackageDescription
+    , lpvLoc        :: !(PackageLocation FilePath)
+    }
+
+-- | A single, fully resolved component of a package
+data NamedComponent
+    = CLib
+    | CExe !Text
+    | CTest !Text
+    | CBench !Text
+    deriving (Show, Eq, Ord)
 
 -- | Value returned by 'Stack.Config.loadConfig'.
-data LoadConfig m = LoadConfig
+data LoadConfig = LoadConfig
     { lcConfig          :: !Config
       -- ^ Top-level Stack configuration.
-    , lcLoadBuildConfig :: !(Maybe CompilerVersion -> m BuildConfig)
+    , lcLoadBuildConfig :: !(Maybe (CompilerVersion 'CVWanted) -> IO BuildConfig)
         -- ^ Action to load the remaining 'BuildConfig'.
     , lcProjectRoot     :: !(Maybe (Path Abs Dir))
         -- ^ The project root directory, if in a project.
@@ -550,14 +583,10 @@ data LoadConfig m = LoadConfig
 
 data PackageEntry = PackageEntry
     { peExtraDepMaybe :: !(Maybe TreatLikeExtraDep)
-    , peLocation :: !PackageLocation
-    , peSubdirs :: ![FilePath]
+    , peLocation :: !(PackageLocation Subdirs)
+    , peSubdirs :: !Subdirs
     }
     deriving Show
-
--- | Perform defaulting of peExtraDepMaybe
-peExtraDepDef :: PackageEntry -> TreatLikeExtraDep
-peExtraDepDef = fromMaybe False . peExtraDepMaybe
 
 -- | Should a package be treated just like an extra-dep?
 --
@@ -569,14 +598,6 @@ peExtraDepDef = fromMaybe False . peExtraDepMaybe
 -- https://github.com/commercialhaskell/stack/issues/386
 type TreatLikeExtraDep = Bool
 
-instance ToJSON PackageEntry where
-    toJSON pe | not (peExtraDepDef pe) && null (peSubdirs pe) =
-        toJSON $ peLocation pe
-    toJSON pe = object $
-        maybe id (\e -> (("extra-dep" .= e):)) (peExtraDepMaybe pe)
-        [ "location" .= peLocation pe
-        , "subdirs" .= peSubdirs pe
-        ]
 instance FromJSON (WithJSONWarnings PackageEntry) where
     parseJSON (String t) = do
         WithJSONWarnings loc _ <- parseJSON $ String t
@@ -584,51 +605,12 @@ instance FromJSON (WithJSONWarnings PackageEntry) where
             PackageEntry
                 { peExtraDepMaybe = Nothing
                 , peLocation = loc
-                , peSubdirs = []
+                , peSubdirs = DefaultSubdirs
                 }
     parseJSON v = withObjectWarnings "PackageEntry" (\o -> PackageEntry
         <$> o ..:? "extra-dep"
         <*> jsonSubWarnings (o ..: "location")
-        <*> o ..:? "subdirs" ..!= []) v
-
-data PackageLocation
-    = PLFilePath FilePath
-    -- ^ Note that we use @FilePath@ and not @Path@s. The goal is: first parse
-    -- the value raw, and then use @canonicalizePath@ and @parseAbsDir@.
-    | PLRemote Text RemotePackageType
-     -- ^ URL and further details
-    deriving Show
-
-data RemotePackageType
-    = RPTHttp
-    | RPTGit Text -- ^ Commit
-    | RPTHg  Text -- ^ Commit
-    deriving Show
-
-instance ToJSON PackageLocation where
-    toJSON (PLFilePath fp) = toJSON fp
-    toJSON (PLRemote t RPTHttp) = toJSON t
-    toJSON (PLRemote x (RPTGit y)) = object [("git", toJSON x), ("commit", toJSON y)]
-    toJSON (PLRemote x (RPTHg  y)) = object [( "hg", toJSON x), ("commit", toJSON y)]
-
-instance FromJSON (WithJSONWarnings PackageLocation) where
-    parseJSON v
-        = (noJSONWarnings <$> withText "PackageLocation" (\t -> http t <|> file t) v)
-        <|> git v
-        <|> hg  v
-      where
-        file t = pure $ PLFilePath $ T.unpack t
-        http t =
-            case parseRequest $ T.unpack t of
-                Left  _ -> mzero
-                Right _ -> return $ PLRemote t RPTHttp
-
-        git = withObjectWarnings "PackageGitLocation" $ \o -> PLRemote
-            <$> o ..: "git"
-            <*> (RPTGit <$> o ..: "commit")
-        hg  = withObjectWarnings "PackageHgLocation"  $ \o -> PLRemote
-            <$> o ..: "hg"
-            <*> (RPTHg  <$> o ..: "commit")
+        <*> o ..:? "subdirs" ..!= DefaultSubdirs) v
 
 -- | A project is a collection of packages. We can have multiple stack.yaml
 -- files, but only one of them may contain project information.
@@ -636,90 +618,40 @@ data Project = Project
     { projectUserMsg :: !(Maybe String)
     -- ^ A warning message to display to the user when the auto generated
     -- config may have issues.
-    , projectPackages :: ![PackageEntry]
-    -- ^ Components of the package list
-    , projectExtraDeps :: !(Map PackageName Version)
-    -- ^ Components of the package list referring to package/version combos,
-    -- see: https://github.com/fpco/stack/issues/41
-    , projectFlags :: !PackageFlags
-    -- ^ Per-package flag overrides
+    , projectPackages :: ![PackageLocation Subdirs]
+    -- ^ Packages which are actually part of the project (as opposed
+    -- to dependencies).
+    --
+    -- /NOTE/ Stack has always allowed these packages to be any kind
+    -- of package location, but in reality only @PLFilePath@ really
+    -- makes sense. We could consider replacing @[PackageLocation]@
+    -- with @[FilePath]@ to properly enforce this idea, though it will
+    -- slightly break backwards compatibility if someone really did
+    -- want to treat such things as non-deps.
+    , projectDependencies :: ![PackageLocationIndex Subdirs]
+    -- ^ Dependencies defined within the stack.yaml file, to be
+    -- applied on top of the snapshot.
+    , projectFlags :: !(Map PackageName (Map FlagName Bool))
+    -- ^ Flags to be applied on top of the snapshot flags.
     , projectResolver :: !Resolver
-    -- ^ How we resolve which dependencies to use
-    , projectCompiler :: !(Maybe CompilerVersion)
+    -- ^ How we resolve which @SnapshotDef@ to use
+    , projectCompiler :: !(Maybe (CompilerVersion 'CVWanted))
     -- ^ When specified, overrides which compiler to use
     , projectExtraPackageDBs :: ![FilePath]
     }
   deriving Show
 
 instance ToJSON Project where
-    toJSON p = object $
-        maybe id (\cv -> (("compiler" .= cv) :)) (projectCompiler p) $
-        maybe id (\msg -> (("user-message" .= msg) :)) (projectUserMsg p)
-        [ "packages"          .= projectPackages p
-        , "extra-deps"        .= map fromTuple (Map.toList $ projectExtraDeps p)
-        , "flags"             .= projectFlags p
-        , "resolver"          .= projectResolver p
-        , "extra-package-dbs" .= projectExtraPackageDBs p
-        ]
-
--- | Class for environment values which have access to the stack root
-class HasStackRoot env where
-    getStackRoot :: env -> Path Abs Dir
-    default getStackRoot :: HasConfig env => env -> Path Abs Dir
-    getStackRoot = configStackRoot . getConfig
-    {-# INLINE getStackRoot #-}
-
--- | Class for environment values which have a Platform
-class HasPlatform env where
-    getPlatform :: env -> Platform
-    default getPlatform :: HasConfig env => env -> Platform
-    getPlatform = configPlatform . getConfig
-    {-# INLINE getPlatform #-}
-    getPlatformVariant :: env -> PlatformVariant
-    default getPlatformVariant :: HasConfig env => env -> PlatformVariant
-    getPlatformVariant = configPlatformVariant . getConfig
-    {-# INLINE getPlatformVariant #-}
-instance HasPlatform (Platform,PlatformVariant) where
-    getPlatform (p,_) = p
-    getPlatformVariant (_,v) = v
-
--- | Class for environment values which have a GHCVariant
-class HasGHCVariant env where
-    getGHCVariant :: env -> GHCVariant
-    default getGHCVariant :: HasBuildConfig env => env -> GHCVariant
-    getGHCVariant = bcGHCVariant . getBuildConfig
-    {-# INLINE getGHCVariant #-}
-instance HasGHCVariant GHCVariant where
-    getGHCVariant = id
-
--- | Class for environment values that can provide a 'Config'.
-class (HasStackRoot env, HasPlatform env) => HasConfig env where
-    getConfig :: env -> Config
-    default getConfig :: HasBuildConfig env => env -> Config
-    getConfig = bcConfig . getBuildConfig
-    {-# INLINE getConfig #-}
-instance HasStackRoot Config
-instance HasPlatform Config
-instance HasConfig Config where
-    getConfig = id
-    {-# INLINE getConfig #-}
-
--- | Class for environment values that can provide a 'BuildConfig'.
-class HasConfig env => HasBuildConfig env where
-    getBuildConfig :: env -> BuildConfig
-instance HasStackRoot BuildConfig
-instance HasPlatform BuildConfig
-instance HasGHCVariant BuildConfig
-instance HasConfig BuildConfig
-instance HasBuildConfig BuildConfig where
-    getBuildConfig = id
-    {-# INLINE getBuildConfig #-}
-
--- | Constraint synonym for constraints satisfied by a 'MiniConfig'
--- environment.
-type StackMiniM r m =
-    ( MonadReader r m, MonadIO m, MonadBaseControl IO m, MonadLoggerIO m, MonadMask m
-    )
+    -- Expanding the constructor fully to ensure we don't miss any fields.
+    toJSON (Project userMsg packages extraDeps flags resolver compiler extraPackageDBs) = object $ concat
+      [ maybe [] (\cv -> ["compiler" .= cv]) compiler
+      , maybe [] (\msg -> ["user-message" .= msg]) userMsg
+      , if null extraPackageDBs then [] else ["extra-package-dbs" .= extraPackageDBs]
+      , if null extraDeps then [] else ["extra-deps" .= extraDeps]
+      , if Map.null flags then [] else ["flags" .= flags]
+      , ["packages" .= packages]
+      , ["resolver" .= resolver]
+      ]
 
 -- An uninterpreted representation of configuration options.
 -- Configurations may be "cascaded" using mappend (left-biased).
@@ -765,9 +697,9 @@ data ConfigMonoid =
     -- ^ Used for overriding the GHC build
     ,configMonoidJobs                :: !(First Int)
     -- ^ See: 'configJobs'
-    ,configMonoidExtraIncludeDirs    :: !(Set (Path Abs Dir))
+    ,configMonoidExtraIncludeDirs    :: !(Set FilePath)
     -- ^ See: 'configExtraIncludeDirs'
-    ,configMonoidExtraLibDirs        :: !(Set (Path Abs Dir))
+    ,configMonoidExtraLibDirs        :: !(Set FilePath)
     -- ^ See: 'configExtraLibDirs'
     , configMonoidOverrideGccPath    :: !(First (Path Abs File))
     -- ^ Allow users to override the path to gcc
@@ -781,8 +713,10 @@ data ConfigMonoid =
     -- ^ Template parameters.
     ,configMonoidScmInit             :: !(First SCM)
     -- ^ Initialize SCM (e.g. git init) when making new projects?
-    ,configMonoidGhcOptions          :: !GhcOptions
-    -- ^ See 'configGhcOptions'
+    ,configMonoidGhcOptionsByName    :: !(Map PackageName [Text])
+    -- ^ See 'configGhcOptionsByName'
+    ,configMonoidGhcOptionsByCat     :: !(Map ApplyGhcOptions [Text])
+    -- ^ See 'configGhcOptionsAll'
     ,configMonoidExtraPath           :: ![Path Abs Dir]
     -- ^ Additional paths to search for executables in
     ,configMonoidSetupInfoLocations  :: ![SetupInfoLocation]
@@ -809,6 +743,8 @@ data ConfigMonoid =
     -- installation.
     , configMonoidDumpLogs           :: !(First DumpLogs)
     -- ^ See 'configDumpLogs'
+    , configMonoidSaveHackageCreds   :: !(First Bool)
+    -- ^ See 'configSaveHackageCreds'
     }
   deriving (Show, Generic)
 
@@ -816,14 +752,14 @@ instance Monoid ConfigMonoid where
     mempty = memptydefault
     mappend = mappenddefault
 
-instance FromJSON (WithJSONWarnings ConfigMonoid) where
-  parseJSON = withObjectWarnings "ConfigMonoid" parseConfigMonoidJSON
+parseConfigMonoid :: Path Abs Dir -> Value -> Yaml.Parser (WithJSONWarnings ConfigMonoid)
+parseConfigMonoid = withObjectWarnings "ConfigMonoid" . parseConfigMonoidObject
 
 -- | Parse a partial configuration.  Used both to parse both a standalone config
 -- file and a project file, so that a sub-parser is not required, which would interfere with
 -- warnings for missing fields.
-parseConfigMonoidJSON :: Object -> WarningParser ConfigMonoid
-parseConfigMonoidJSON obj = do
+parseConfigMonoidObject :: Path Abs Dir -> Object -> WarningParser ConfigMonoid
+parseConfigMonoidObject rootDir obj = do
     -- Parsing 'stackRoot' from 'stackRoot'/config.yaml would be nonsensical
     let configMonoidStackRoot = First Nothing
     configMonoidWorkDir <- First <$> obj ..:? configMonoidWorkDirName
@@ -846,8 +782,10 @@ parseConfigMonoidJSON obj = do
     configMonoidGHCVariant <- First <$> obj ..:? configMonoidGHCVariantName
     configMonoidGHCBuild <- First <$> obj ..:? configMonoidGHCBuildName
     configMonoidJobs <- First <$> obj ..:? configMonoidJobsName
-    configMonoidExtraIncludeDirs <- obj ..:?  configMonoidExtraIncludeDirsName ..!= Set.empty
-    configMonoidExtraLibDirs <- obj ..:?  configMonoidExtraLibDirsName ..!= Set.empty
+    configMonoidExtraIncludeDirs <- fmap (Set.map (toFilePath rootDir FilePath.</>)) $
+        obj ..:?  configMonoidExtraIncludeDirsName ..!= Set.empty
+    configMonoidExtraLibDirs <- fmap (Set.map (toFilePath rootDir FilePath.</>)) $
+        obj ..:?  configMonoidExtraLibDirsName ..!= Set.empty
     configMonoidOverrideGccPath <- First <$> obj ..:? configMonoidOverrideGccPathName
     configMonoidConcurrentTests <- First <$> obj ..:? configMonoidConcurrentTestsName
     configMonoidLocalBinPath <- First <$> obj ..:? configMonoidLocalBinPathName
@@ -862,7 +800,26 @@ parseConfigMonoidJSON obj = do
           return (First scmInit,fromMaybe M.empty params)
     configMonoidCompilerCheck <- First <$> obj ..:? configMonoidCompilerCheckName
 
-    configMonoidGhcOptions <- obj ..:? configMonoidGhcOptionsName ..!= mempty
+    options <- Map.map unGhcOptions <$> obj ..:? configMonoidGhcOptionsName ..!= mempty
+
+    optionsEverything <-
+      case (Map.lookup GOKOldEverything options, Map.lookup GOKEverything options) of
+        (Just _, Just _) -> fail "Cannot specify both `*` and `$everything` GHC options"
+        (Nothing, Just x) -> return x
+        (Just x, Nothing) -> do
+          tell "The `*` ghc-options key is not recommended. Consider using $locals, or if really needed, $everything"
+          return x
+        (Nothing, Nothing) -> return []
+
+    let configMonoidGhcOptionsByCat = Map.fromList
+          [ (AGOEverything, optionsEverything)
+          , (AGOLocals, Map.findWithDefault [] GOKLocals options)
+          , (AGOTargets, Map.findWithDefault [] GOKTargets options)
+          ]
+
+        configMonoidGhcOptionsByName = Map.fromList
+            [(name, opts) | (GOKPackage name, opts) <- Map.toList options]
+
     configMonoidExtraPath <- obj ..:? configMonoidExtraPathName ..!= []
     configMonoidSetupInfoLocations <-
         maybeToList <$> jsonSubWarningsT (obj ..:?  configMonoidSetupInfoLocationsName)
@@ -878,6 +835,7 @@ parseConfigMonoidJSON obj = do
     configMonoidDefaultTemplate <- First <$> obj ..:? configMonoidDefaultTemplateName
     configMonoidAllowDifferentUser <- First <$> obj ..:? configMonoidAllowDifferentUserName
     configMonoidDumpLogs <- First <$> obj ..:? configMonoidDumpLogsName
+    configMonoidSaveHackageCreds <- First <$> obj ..:? configMonoidSaveHackageCredsName
 
     return ConfigMonoid {..}
   where
@@ -1011,17 +969,19 @@ configMonoidAllowDifferentUserName = "allow-different-user"
 configMonoidDumpLogsName :: Text
 configMonoidDumpLogsName = "dump-logs"
 
+configMonoidSaveHackageCredsName :: Text
+configMonoidSaveHackageCredsName = "save-hackage-creds"
+
 data ConfigException
   = ParseConfigFileException (Path Abs File) ParseException
   | ParseCustomSnapshotException Text ParseException
-  | ParseResolverException Text
   | NoProjectConfigFound (Path Abs Dir) (Maybe Text)
   | UnexpectedArchiveContents [Path Abs Dir] [Path Abs File]
   | UnableToExtractArchive Text (Path Abs File)
   | BadStackVersionException VersionRange
   | NoMatchingSnapshot WhichSolverCmd (NonEmpty SnapName)
-  | forall l. ResolverMismatch WhichSolverCmd (ResolverThat's l) String
-  | ResolverPartial WhichSolverCmd Resolver String
+  | ResolverMismatch WhichSolverCmd !Text String -- Text == resolver name, sdName
+  | ResolverPartial WhichSolverCmd !Text String -- Text == resolver name, sdName
   | NoSuchDirectory FilePath
   | ParseGHCVariantException String
   | BadStackRoot (Path Abs Dir)
@@ -1030,6 +990,10 @@ data ConfigException
   | FailedToCloneRepo String
   | ManualGHCVariantSettingsAreIncompatibleWithSystemGHC
   | NixRequiresSystemGhc
+  | NoResolverWhenUsingNoLocalConfig
+  | InvalidResolverForNoLocalConfig String
+  | InvalidCabalFileInLocal !(PackageLocationIndex FilePath) !PError !ByteString
+  | DuplicateLocalPackageNames ![(PackageName, [PackageLocationIndex FilePath])]
   deriving Typeable
 instance Show ConfigException where
     show (ParseConfigFileException configFile exception) = concat
@@ -1046,12 +1010,6 @@ instance Show ConfigException where
         , Yaml.prettyPrintParseException exception
         -- FIXME: Link to docs about custom snapshots
         -- , "\nSee http://docs.haskellstack.org/en/stable/yaml_configuration/"
-        ]
-    show (ParseResolverException t) = concat
-        [ "Invalid resolver value: "
-        , T.unpack t
-        , ". Possible valid values include lts-2.12, nightly-YYYY-MM-DD, ghc-7.10.2, and ghcjs-0.1.0_ghc-7.10.2. "
-        , "See https://www.stackage.org/snapshots for a complete list."
         ]
     show (NoProjectConfigFound dir mcmd) = concat
         [ "Unable to find a stack.yaml file in the current directory ("
@@ -1088,7 +1046,7 @@ instance Show ConfigException where
         ]
     show (ResolverMismatch whichCmd resolver errDesc) = concat
         [ "Resolver '"
-        , T.unpack (resolverName resolver)
+        , T.unpack resolver
         , "' does not have a matching compiler to build some or all of your "
         , "package(s).\n"
         , errDesc
@@ -1096,7 +1054,7 @@ instance Show ConfigException where
         ]
     show (ResolverPartial whichCmd resolver errDesc) = concat
         [ "Resolver '"
-        , T.unpack (resolverName resolver)
+        , T.unpack resolver
         , "' does not have all the packages to match your requirements.\n"
         , unlines $ fmap ("    " <>) (lines errDesc)
         , showOptions whichCmd
@@ -1148,6 +1106,23 @@ instance Show ConfigException where
         , configMonoidSystemGHCName
         , "' or disable the Nix integration."
         ]
+    show NoResolverWhenUsingNoLocalConfig = "When using the script command, you must provide a resolver argument"
+    show (InvalidResolverForNoLocalConfig ar) = "The script command requires a specific resolver, you provided " ++ ar
+    show (InvalidCabalFileInLocal loc err _) = concat
+      [ "Unable to parse cabal file from "
+      , show loc
+      , ": "
+      , show err
+      ]
+    show (DuplicateLocalPackageNames pairs) = concat
+        $ "The same package name is used in multiple local packages\n"
+        : map go pairs
+      where
+        go (name, dirs) = unlines
+            $ ""
+            : (packageNameString name ++ " used in:")
+            : map goLoc dirs
+        goLoc loc = "- " ++ show loc
 instance Exception ConfigException
 
 showOptions :: WhichSolverCmd -> SuggestSolver -> String
@@ -1170,55 +1145,38 @@ data WhichSolverCmd = IsInitCmd | IsSolverCmd | IsNewCmd
 
 data SuggestSolver = SuggestSolver | Don'tSuggestSolver
 
--- | Helper function to ask the environment and apply getConfig
-askConfig :: (MonadReader env m, HasConfig env) => m Config
-askConfig = liftM getConfig ask
-
 -- | Get the URL to request the information on the latest snapshots
 askLatestSnapshotUrl :: (MonadReader env m, HasConfig env) => m Text
-askLatestSnapshotUrl = asks (urlsLatestSnapshot . configUrls . getConfig)
+askLatestSnapshotUrl = view $ configL.to configUrls.to urlsLatestSnapshot
 
 -- | Root for a specific package index
 configPackageIndexRoot :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs Dir)
 configPackageIndexRoot (IndexName name) = do
-    config <- asks getConfig
+    root <- view stackRootL
     dir <- parseRelDir $ S8.unpack name
-    return (configStackRoot config </> $(mkRelDir "indices") </> dir)
+    return (root </> $(mkRelDir "indices") </> dir)
 
--- | Git repo directory for a specific package index, returns 'Nothing' if not
--- a Git repo
-configPackageIndexRepo :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Maybe (Path Abs Dir))
-configPackageIndexRepo name = do
-    indices <- asks $ configPackageIndices . getConfig
-    case filter (\p -> indexName p == name) indices of
-        [index] -> do
-            let murl =
-                    case indexLocation index of
-                        ILGit x -> Just x
-                        ILHttp _ -> Nothing
-                        ILGitHttp x _ -> Just x
-            case murl of
-                Nothing -> return Nothing
-                Just url -> do
-                    sDir <- configPackageIndexRoot name
-                    repoName <- parseRelDir $ takeBaseName $ T.unpack url
-                    let suDir =
-                          sDir </>
-                          $(mkRelDir "git-update")
-                    return $ Just $ suDir </> repoName
-        _ -> assert False $ return Nothing
+-- | Location of the 01-index.cache file
+configPackageIndexCache :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs File)
+configPackageIndexCache = liftM (</> $(mkRelFile "01-index.cache")) . configPackageIndexRoot
 
 -- | Location of the 00-index.cache file
-configPackageIndexCache :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs File)
-configPackageIndexCache = liftM (</> $(mkRelFile "00-index.cache")) . configPackageIndexRoot
+configPackageIndexCacheOld :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs File)
+configPackageIndexCacheOld = liftM (</> $(mkRelFile "00-index.cache")) . configPackageIndexRoot
 
--- | Location of the 00-index.tar file
+-- | Location of the 01-index.tar file
 configPackageIndex :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs File)
-configPackageIndex = liftM (</> $(mkRelFile "00-index.tar")) . configPackageIndexRoot
+configPackageIndex = liftM (</> $(mkRelFile "01-index.tar")) . configPackageIndexRoot
 
--- | Location of the 00-index.tar.gz file
+-- | Location of the 00-index.tar file. This file is just a copy of
+-- the 01-index.tar file, provided for tools which still look for the
+-- 00-index.tar file.
+configPackageIndexOld :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs File)
+configPackageIndexOld = liftM (</> $(mkRelFile "00-index.tar")) . configPackageIndexRoot
+
+-- | Location of the 01-index.tar.gz file
 configPackageIndexGz :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> m (Path Abs File)
-configPackageIndexGz = liftM (</> $(mkRelFile "00-index.tar.gz")) . configPackageIndexRoot
+configPackageIndexGz = liftM (</> $(mkRelFile "01-index.tar.gz")) . configPackageIndexRoot
 
 -- | Location of a package tarball
 configPackageTarball :: (MonadReader env m, HasConfig env, MonadThrow m) => IndexName -> PackageIdentifier -> m (Path Abs File)
@@ -1230,15 +1188,15 @@ configPackageTarball iname ident = do
     return (root </> $(mkRelDir "packages") </> name </> ver </> base)
 
 -- | @".stack-work"@
-getWorkDir :: (MonadReader env m, HasConfig env) => m (Path Rel Dir)
-getWorkDir = configWorkDir `liftM` asks getConfig
+workDirL :: HasConfig env => Lens' env (Path Rel Dir)
+workDirL = configL.lens configWorkDir (\x y -> x { configWorkDir = y })
 
 -- | Per-project work dir
 getProjectWorkDir :: (HasBuildConfig env, MonadReader env m) => m (Path Abs Dir)
 getProjectWorkDir = do
-    bc      <- asks getBuildConfig
-    workDir <- getWorkDir
-    return (bcRoot bc </> workDir)
+    root    <- view projectRootL
+    workDir <- view workDirL
+    return (root </> workDir)
 
 -- | File containing the installed cache, see "Stack.PackageDump"
 configInstalledCache :: (HasBuildConfig env, MonadReader env m) => m (Path Abs File)
@@ -1249,31 +1207,31 @@ platformOnlyRelDir
     :: (MonadReader env m, HasPlatform env, MonadThrow m)
     => m (Path Rel Dir)
 platformOnlyRelDir = do
-    platform <- asks getPlatform
-    platformVariant <- asks getPlatformVariant
+    platform <- view platformL
+    platformVariant <- view platformVariantL
     parseRelDir (Distribution.Text.display platform ++ platformVariantSuffix platformVariant)
 
 -- | Directory containing snapshots
 snapshotsDir :: (MonadReader env m, HasEnvConfig env, MonadThrow m) => m (Path Abs Dir)
 snapshotsDir = do
-    config <- asks getConfig
+    root <- view stackRootL
     platform <- platformGhcRelDir
-    return $ configStackRoot config </> $(mkRelDir "snapshots") </> platform
+    return $ root </> $(mkRelDir "snapshots") </> platform
 
 -- | Installation root for dependencies
 installationRootDeps :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Abs Dir)
 installationRootDeps = do
-    config <- asks getConfig
+    root <- view stackRootL
     -- TODO: also useShaPathOnWindows here, once #1173 is resolved.
     psc <- platformSnapAndCompilerRel
-    return $ configStackRoot config </> $(mkRelDir "snapshots") </> psc
+    return $ root </> $(mkRelDir "snapshots") </> psc
 
 -- | Installation root for locals
 installationRootLocal :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Abs Dir)
 installationRootLocal = do
-    bc <- asks getBuildConfig
+    workDir <- getProjectWorkDir
     psc <- useShaPathOnWindows =<< platformSnapAndCompilerRel
-    return $ getProjectWorkDir bc </> $(mkRelDir "install") </> psc
+    return $ workDir </> $(mkRelDir "install") </> psc
 
 -- | Installation root for compiler tools
 bindirCompilerTools :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Abs Dir)
@@ -1292,9 +1250,9 @@ bindirCompilerTools = do
 -- | Hoogle directory.
 hoogleRoot :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Abs Dir)
 hoogleRoot = do
-    bc <- asks getBuildConfig
+    workDir <- getProjectWorkDir
     psc <- useShaPathOnWindows =<< platformSnapAndCompilerRel
-    return $ getProjectWorkDir bc </> $(mkRelDir "hoogle") </> psc
+    return $ workDir </> $(mkRelDir "hoogle") </> psc
 
 -- | Get the hoogle database path.
 hoogleDatabasePath :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Abs File)
@@ -1308,9 +1266,9 @@ platformSnapAndCompilerRel
     :: (MonadReader env m, HasEnvConfig env, MonadThrow m)
     => m (Path Rel Dir)
 platformSnapAndCompilerRel = do
-    bc <- asks getBuildConfig
+    sd <- view snapshotDefL
     platform <- platformGhcRelDir
-    name <- parseRelDir $ T.unpack $ resolverDirName $ bcResolver bc
+    name <- parseRelDir $ sdRawPathName sd
     ghc <- compilerVersionDir
     useShaPathOnWindows (platform </> name </> ghc)
 
@@ -1319,10 +1277,10 @@ platformGhcRelDir
     :: (MonadReader env m, HasEnvConfig env, MonadThrow m)
     => m (Path Rel Dir)
 platformGhcRelDir = do
-    envConfig <- asks getEnvConfig
+    ec <- view envConfigL
     verOnly <- platformGhcVerOnlyRelDirStr
     parseRelDir (mconcat [ verOnly
-                         , compilerBuildSuffix (envConfigCompilerBuild envConfig)])
+                         , compilerBuildSuffix (envConfigCompilerBuild ec)])
 
 -- | Relative directory for the platform and GHC identifier without GHC bindist build
 platformGhcVerOnlyRelDir
@@ -1337,9 +1295,9 @@ platformGhcVerOnlyRelDirStr
     :: (MonadReader env m, HasPlatform env, HasGHCVariant env)
     => m FilePath
 platformGhcVerOnlyRelDirStr = do
-    platform <- asks getPlatform
-    platformVariant <- asks getPlatformVariant
-    ghcVariant <- asks getGHCVariant
+    platform <- view platformL
+    platformVariant <- view platformVariantL
+    ghcVariant <- view ghcVariantL
     return $ mconcat [ Distribution.Text.display platform
                      , platformVariantSuffix platformVariant
                      , ghcVariantSuffix ghcVariant ]
@@ -1351,14 +1309,14 @@ platformGhcVerOnlyRelDirStr = do
 useShaPathOnWindows :: MonadThrow m => Path Rel Dir -> m (Path Rel Dir)
 useShaPathOnWindows =
 #ifdef mingw32_HOST_OS
-    parseRelDir . S8.unpack . S8.take 8 . B16.encode . SHA1.hash . encodeUtf8 . T.pack . toFilePath
+    parseRelDir . S8.unpack . S8.take 8 . Mem.convertToBase Mem.Base16 . hashWith SHA1 . encodeUtf8 . T.pack . toFilePath
 #else
     return
 #endif
 
 compilerVersionDir :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Rel Dir)
 compilerVersionDir = do
-    compilerVersion <- asks (envConfigCompilerVersion . getEnvConfig)
+    compilerVersion <- view actualCompilerVersionL
     parseRelDir $ case compilerVersion of
         GhcVersion version -> versionString version
         GhcjsVersion {} -> compilerVersionString compilerVersion
@@ -1376,10 +1334,8 @@ packageDatabaseLocal = do
     return $ root </> $(mkRelDir "pkgdb")
 
 -- | Extra package databases
-packageDatabaseExtra :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m [Path Abs Dir]
-packageDatabaseExtra = do
-    bc <- asks getBuildConfig
-    return $ bcExtraPackageDBs bc
+packageDatabaseExtra :: (MonadReader env m, HasEnvConfig env) => m [Path Abs Dir]
+packageDatabaseExtra = view $ buildConfigL.to bcExtraPackageDBs
 
 -- | Directory for holding flag cache information
 flagCacheLocal :: (MonadThrow m, MonadReader env m, HasEnvConfig env) => m (Path Abs Dir)
@@ -1387,16 +1343,30 @@ flagCacheLocal = do
     root <- installationRootLocal
     return $ root </> $(mkRelDir "flag-cache")
 
--- | Where to store mini build plan caches
-configMiniBuildPlanCache :: (MonadThrow m, MonadReader env m, HasConfig env, HasGHCVariant env)
-                         => SnapName
-                         -> m (Path Abs File)
-configMiniBuildPlanCache name = do
-    root <- asks getStackRoot
+-- | Where to store 'LoadedSnapshot' caches
+configLoadedSnapshotCache
+  :: (MonadThrow m, MonadReader env m, HasConfig env, HasGHCVariant env)
+  => SnapshotDef
+  -> GlobalInfoSource
+  -> m (Path Abs File)
+configLoadedSnapshotCache sd gis = do
+    root <- view stackRootL
     platform <- platformGhcVerOnlyRelDir
-    file <- parseRelFile $ T.unpack (renderSnapName name) ++ ".cache"
+    file <- parseRelFile $ sdRawPathName sd ++ ".cache"
+    gis' <- parseRelDir $
+          case gis of
+            GISSnapshotHints -> "__snapshot_hints__"
+            GISCompiler cv -> compilerVersionString cv
     -- Yes, cached plans differ based on platform
-    return (root </> $(mkRelDir "build-plan-cache") </> platform </> file)
+    return (root </> $(mkRelDir "loaded-snapshot-cache") </> platform </> gis' </> file)
+
+-- | Where do we get information on global packages for loading up a
+-- 'LoadedSnapshot'?
+data GlobalInfoSource
+  = GISSnapshotHints
+  -- ^ Accept the hints in the snapshot definition
+  | GISCompiler (CompilerVersion 'CVActual)
+  -- ^ Look up the actual information in the installed compiler
 
 -- | Suffix applied to an installation root to get the bin dir
 bindirSuffix :: Path Rel Dir
@@ -1430,8 +1400,8 @@ extraBinDirs = do
 -- processes like git or ghc
 getMinimalEnvOverride :: (MonadReader env m, HasConfig env, MonadIO m) => m EnvOverride
 getMinimalEnvOverride = do
-    config <- asks getConfig
-    liftIO $ configEnvOverride config minimalEnvSettings
+    config' <- view configL
+    liftIO $ configEnvOverride config' minimalEnvSettings
 
 minimalEnvSettings :: EnvSettings
 minimalEnvSettings =
@@ -1442,9 +1412,6 @@ minimalEnvSettings =
     , esLocaleUtf8 = False
     }
 
-getWhichCompiler :: (MonadReader env m, HasEnvConfig env) => m WhichCompiler
-getWhichCompiler = asks (whichCompiler . envConfigCompilerVersion . getEnvConfig)
-
 -- | Get the path for the given compiler ignoring any local binaries.
 --
 -- https://github.com/commercialhaskell/stack/issues/1052
@@ -1453,63 +1420,93 @@ getCompilerPath
     => WhichCompiler
     -> m (Path Abs File)
 getCompilerPath wc = do
-    config <- asks getConfig
+    config' <- view configL
     eoWithoutLocals <- liftIO $
-        configEnvOverride config minimalEnvSettings { esLocaleUtf8 = True }
+        configEnvOverride config' minimalEnvSettings { esLocaleUtf8 = True }
     join (findExecutable eoWithoutLocals (compilerExeName wc))
 
 data ProjectAndConfigMonoid
   = ProjectAndConfigMonoid !Project !ConfigMonoid
 
-instance FromJSON (WithJSONWarnings ProjectAndConfigMonoid) where
-    parseJSON = withObjectWarnings "ProjectAndConfigMonoid" $ \o -> do
+parseProjectAndConfigMonoid :: Path Abs Dir -> Value -> Yaml.Parser (WithJSONWarnings ProjectAndConfigMonoid)
+parseProjectAndConfigMonoid rootDir =
+    withObjectWarnings "ProjectAndConfigMonoid" $ \o -> do
         dirs <- jsonSubWarningsTT (o ..:? "packages") ..!= [packageEntryCurrDir]
-        extraDeps' <- o ..:? "extra-deps" ..!= []
-        extraDeps <-
-            case partitionEithers $ goDeps extraDeps' of
-                ([], x) -> return $ Map.fromList x
-                (errs, _) -> fail $ unlines errs
-
+        extraDeps <- jsonSubWarningsTT (o ..:? "extra-deps") ..!= []
         flags <- o ..:? "flags" ..!= mempty
-        resolver <- jsonSubWarnings (o ..: "resolver")
+
+        -- Convert the packages/extra-deps/flags approach we use in
+        -- the stack.yaml into the internal representation.
+        let (packages, deps) = convert dirs extraDeps
+
+        resolver <- (o ..: "resolver")
+                >>= either (fail . show) return
+                  . parseCustomLocation (Just rootDir)
         compiler <- o ..:? "compiler"
         msg <- o ..:? "user-message"
-        config <- parseConfigMonoidJSON o
+        config <- parseConfigMonoidObject rootDir o
         extraPackageDBs <- o ..:? "extra-package-dbs" ..!= []
         let project = Project
                 { projectUserMsg = msg
-                , projectPackages = dirs
-                , projectExtraDeps = extraDeps
-                , projectFlags = flags
                 , projectResolver = resolver
                 , projectCompiler = compiler
                 , projectExtraPackageDBs = extraPackageDBs
+                , projectPackages = packages
+                , projectDependencies = deps
+                , projectFlags = flags
                 }
         return $ ProjectAndConfigMonoid project config
       where
-        goDeps =
-            map toSingle . Map.toList . Map.unionsWith Set.union . map toMap
+        convert :: [PackageEntry]
+                -> [PackageLocationIndex Subdirs] -- extra-deps
+                -> ( [PackageLocation Subdirs] -- project
+                   , [PackageLocationIndex Subdirs] -- dependencies
+                   )
+        convert entries extraDeps =
+            partitionEithers $ concatMap goEntry entries ++ map Right extraDeps
           where
-            toMap i = Map.singleton
-                (packageIdentifierName i)
-                (Set.singleton (packageIdentifierVersion i))
+            goEntry :: PackageEntry -> [Either (PackageLocation Subdirs) (PackageLocationIndex Subdirs)]
+            goEntry (PackageEntry Nothing pl@(PLFilePath _) subdirs) = goEntry' False pl subdirs
+            goEntry (PackageEntry Nothing pl _) = fail $ concat
+              [ "Refusing to implicitly treat package location as an extra-dep:\n"
+              , show pl
+              , "\nRecommendation: either move to 'extra-deps' or set 'extra-dep: true'."
+              ]
+            goEntry (PackageEntry (Just extraDep) pl subdirs) = goEntry' extraDep pl subdirs
 
-        toSingle (k, s) =
-            case Set.toList s of
-                [x] -> Right (k, x)
-                xs -> Left $ concat
-                    [ "Multiple versions for package "
-                    , packageNameString k
-                    , ": "
-                    , unwords $ map versionString xs
-                    ]
+            goEntry' :: Bool -- ^ extra dep?
+                     -> PackageLocation Subdirs
+                     -> Subdirs
+                     -> [Either (PackageLocation Subdirs) (PackageLocationIndex Subdirs)]
+            goEntry' extraDep pl subdirs =
+              map (if extraDep then Right . PLOther else Left) (addSubdirs pl subdirs)
+
+            combineSubdirs :: [FilePath] -> Subdirs -> Subdirs
+            combineSubdirs paths DefaultSubdirs = ExplicitSubdirs paths
+            -- this could be considered an error condition, but we'll
+            -- just try and make it work
+            combineSubdirs paths (ExplicitSubdirs paths') = ExplicitSubdirs (paths ++ paths')
+
+            -- We do the toList/fromList bit as an efficient nub, and
+            -- to avoid having duplicate subdir names (especially for
+            -- the "." case, where parsing gets wonky).
+            addSubdirs :: PackageLocation Subdirs
+                       -> Subdirs
+                       -> [PackageLocation Subdirs]
+            addSubdirs pl DefaultSubdirs = [pl]
+            addSubdirs (PLRepo repo) (ExplicitSubdirs subdirs) =
+              [PLRepo repo { repoSubdirs = combineSubdirs subdirs $ repoSubdirs repo }]
+            addSubdirs (PLArchive arch) (ExplicitSubdirs subdirs) =
+              [PLArchive arch { archiveSubdirs = combineSubdirs subdirs $ archiveSubdirs arch }]
+            addSubdirs (PLFilePath fp) (ExplicitSubdirs subdirs) =
+              map (\subdir -> PLFilePath $ fp FilePath.</> subdir) subdirs
 
 -- | A PackageEntry for the current directory, used as a default
 packageEntryCurrDir :: PackageEntry
 packageEntryCurrDir = PackageEntry
     { peExtraDepMaybe = Nothing
     , peLocation = PLFilePath "."
-    , peSubdirs = []
+    , peSubdirs = DefaultSubdirs
     }
 
 -- | A software control system.
@@ -1634,7 +1631,7 @@ data SetupInfo = SetupInfo
     , siSevenzDll :: Maybe DownloadInfo
     , siMsys2 :: Map Text VersionedDownloadInfo
     , siGHCs :: Map Text (Map Version GHCDownloadInfo)
-    , siGHCJSs :: Map Text (Map CompilerVersion DownloadInfo)
+    , siGHCJSs :: Map Text (Map (CompilerVersion 'CVActual) DownloadInfo)
     , siStack :: Map Text (Map Version DownloadInfo)
     }
     deriving Show
@@ -1687,36 +1684,51 @@ instance FromJSON (WithJSONWarnings SetupInfoLocation) where
             return $ WithJSONWarnings (SetupInfoInline si) w
 
 -- | How PVP bounds should be added to .cabal files
-data PvpBounds
+data PvpBoundsType
   = PvpBoundsNone
   | PvpBoundsUpper
   | PvpBoundsLower
   | PvpBoundsBoth
   deriving (Show, Read, Eq, Typeable, Ord, Enum, Bounded)
 
-pvpBoundsText :: PvpBounds -> Text
+data PvpBounds = PvpBounds
+  { pbType :: !PvpBoundsType
+  , pbAsRevision :: !Bool
+  }
+  deriving (Show, Read, Eq, Typeable, Ord)
+
+pvpBoundsText :: PvpBoundsType -> Text
 pvpBoundsText PvpBoundsNone = "none"
 pvpBoundsText PvpBoundsUpper = "upper"
 pvpBoundsText PvpBoundsLower = "lower"
 pvpBoundsText PvpBoundsBoth = "both"
 
 parsePvpBounds :: Text -> Either String PvpBounds
-parsePvpBounds t =
-    case Map.lookup t m of
-        Nothing -> Left $ "Invalid PVP bounds: " ++ T.unpack t
-        Just x -> Right x
+parsePvpBounds t = maybe err Right $ do
+    (t', asRevision) <-
+      case T.break (== '-') t of
+        (x, "") -> Just (x, False)
+        (x, "-revision") -> Just (x, True)
+        _ -> Nothing
+    x <- Map.lookup t' m
+    Just PvpBounds
+      { pbType = x
+      , pbAsRevision = asRevision
+      }
   where
     m = Map.fromList $ map (pvpBoundsText &&& id) [minBound..maxBound]
+    err = Left $ "Invalid PVP bounds: " ++ T.unpack t
 
 instance ToJSON PvpBounds where
-  toJSON = toJSON . pvpBoundsText
+  toJSON (PvpBounds typ asRevision) =
+    toJSON (pvpBoundsText typ <> (if asRevision then "-revision" else ""))
 instance FromJSON PvpBounds where
   parseJSON = withText "PvpBounds" (either fail return . parsePvpBounds)
 
 -- | Provide an explicit list of package dependencies when running a custom Setup.hs
 explicitSetupDeps :: (MonadReader env m, HasConfig env) => PackageName -> m Bool
 explicitSetupDeps name = do
-    m <- asks $ configExplicitSetupDeps . getConfig
+    m <- view $ configL.to configExplicitSetupDeps
     return $
         -- Yes there are far cleverer ways to write this. I honestly consider
         -- the explicit pattern matching much easier to parse at a glance.
@@ -1728,8 +1740,8 @@ explicitSetupDeps name = do
                     Nothing -> False -- default value
 
 -- | Data passed into Docker container for the Docker entrypoint's use
-data DockerEntrypoint = DockerEntrypoint
-    { deUser :: !(Maybe DockerUser)
+newtype DockerEntrypoint = DockerEntrypoint
+    { deUser :: Maybe DockerUser
       -- ^ UID/GID/etc of host user, if we wish to perform UID/GID switch in container
     } deriving (Read,Show)
 
@@ -1741,78 +1753,232 @@ data DockerUser = DockerUser
     , duUmask :: FileMode -- ^ File creation mask }
     } deriving (Read,Show)
 
--- TODO: See section of
--- https://github.com/commercialhaskell/stack/issues/1265 about
--- rationalizing the config. It would also be nice to share more code.
--- For now it's more convenient just to extend this type. However, it's
--- unpleasant that it has overlap with both 'Project' and 'Config'.
-data CustomSnapshot = CustomSnapshot
-    { csCompilerVersion :: !(Maybe CompilerVersion)
-    , csPackages :: !(Set PackageIdentifier)
-    , csDropPackages :: !(Set PackageName)
-    , csFlags :: !PackageFlags
-    , csGhcOptions :: !GhcOptions
-    }
+data GhcOptionKey
+  = GOKOldEverything
+  | GOKEverything
+  | GOKLocals
+  | GOKTargets
+  | GOKPackage !PackageName
+  deriving (Eq, Ord)
 
-instance FromJSON (WithJSONWarnings (CustomSnapshot, Maybe Resolver)) where
-    parseJSON = withObjectWarnings "CustomSnapshot" $ \o -> (,)
-        <$> (CustomSnapshot
-            <$> o ..:? "compiler"
-            <*> o ..:? "packages" ..!= mempty
-            <*> o ..:? "drop-packages" ..!= mempty
-            <*> o ..:? "flags" ..!= mempty
-            <*> o ..:? configMonoidGhcOptionsName ..!= mempty)
-        <*> jsonSubWarningsT (o ..:? "resolver")
+instance FromJSONKey GhcOptionKey where
+  fromJSONKey = FromJSONKeyTextParser $ \t ->
+    case t of
+      "*" -> return GOKOldEverything
+      "$everything" -> return GOKEverything
+      "$locals" -> return GOKLocals
+      "$targets" -> return GOKTargets
+      _ ->
+        case parsePackageName t of
+          Left e -> fail $ show e
+          Right x -> return $ GOKPackage x
+  fromJSONKeyList = FromJSONKeyTextParser $ \_ -> fail "GhcOptionKey.fromJSONKeyList"
 
-newtype GhcOptions = GhcOptions
-    { unGhcOptions :: Map (Maybe PackageName) [Text] }
-    deriving Show
+newtype GhcOptions = GhcOptions { unGhcOptions :: [Text] }
 
 instance FromJSON GhcOptions where
-    parseJSON val = do
-        ghcOptions <- parseJSON val
-        fmap (GhcOptions . Map.fromList) $ mapM handleGhcOptions $ Map.toList ghcOptions
-      where
-        handleGhcOptions :: Monad m => (Text, Text) -> m (Maybe PackageName, [Text])
-        handleGhcOptions (name', vals') = do
-            name <-
-                if name' == "*"
-                    then return Nothing
-                    else case parsePackageNameFromString $ T.unpack name' of
-                            Left e -> fail $ show e
-                            Right x -> return $ Just x
+  parseJSON = withText "GhcOptions" $ \t ->
+    case parseArgs Escaping t of
+      Left e -> fail e
+      Right opts -> return $ GhcOptions $ map T.pack opts
 
-            case parseArgs Escaping vals' of
-                Left e -> fail e
-                Right vals -> return (name, map T.pack vals)
+-----------------------------------
+-- Lens classes
+-----------------------------------
 
-instance Monoid GhcOptions where
-    mempty = GhcOptions mempty
-    -- FIXME: Should GhcOptions really monoid like this? Keeping it this
-    -- way preserves the behavior of the ConfigMonoid. However, this
-    -- means there isn't the ability to fully override snapshot
-    -- ghc-options in the same way there is for flags. Do we want to
-    -- change the semantics here? (particularly for extensible
-    -- snapshots)
-    mappend (GhcOptions l) (GhcOptions r) =
-        GhcOptions (Map.unionWith (++) l r)
+-- | Class for environment values which have a Platform
+class HasPlatform env where
+    platformL :: Lens' env Platform
+    default platformL :: HasConfig env => Lens' env Platform
+    platformL = configL.platformL
+    {-# INLINE platformL #-}
+    platformVariantL :: Lens' env PlatformVariant
+    default platformVariantL :: HasConfig env => Lens' env PlatformVariant
+    platformVariantL = configL.platformVariantL
+    {-# INLINE platformVariantL #-}
 
-ghcOptionsFor :: PackageName -> GhcOptions -> [Text]
-ghcOptionsFor name (GhcOptions mp) =
-    M.findWithDefault [] Nothing mp ++
-    M.findWithDefault [] (Just name) mp
+-- | Class for environment values which have a GHCVariant
+class HasGHCVariant env where
+    ghcVariantL :: Lens' env GHCVariant
+    default ghcVariantL :: HasBuildConfig env => Lens' env GHCVariant
+    ghcVariantL = buildConfigL.ghcVariantL
+    {-# INLINE ghcVariantL #-}
 
-newtype PackageFlags = PackageFlags
-    { unPackageFlags :: Map PackageName (Map FlagName Bool) }
-    deriving Show
+-- | Class for environment values that can provide a 'Config'.
+class (HasPlatform env, HasRunner env) => HasConfig env where
+    configL :: Lens' env Config
+    default configL :: HasBuildConfig env => Lens' env Config
+    configL = buildConfigL.lens bcConfig (\x y -> x { bcConfig = y })
+    {-# INLINE configL #-}
 
-instance FromJSON PackageFlags where
-    parseJSON val = PackageFlags <$> parseJSON val
+class HasConfig env => HasBuildConfig env where
+    buildConfigL :: Lens' env BuildConfig
+    default buildConfigL :: HasEnvConfig env => Lens' env BuildConfig
+    buildConfigL = envConfigL.lens
+        envConfigBuildConfig
+        (\x y -> x { envConfigBuildConfig = y })
 
-instance ToJSON PackageFlags where
-    toJSON = toJSON . unPackageFlags
+class (HasBuildConfig env, HasGHCVariant env) => HasEnvConfig env where
+    envConfigL :: Lens' env EnvConfig
 
-instance Monoid PackageFlags where
-    mempty = PackageFlags mempty
-    mappend (PackageFlags l) (PackageFlags r) =
-        PackageFlags (Map.unionWith Map.union l r)
+-----------------------------------
+-- Lens instances
+-----------------------------------
+
+instance HasPlatform (Platform,PlatformVariant) where
+    platformL = _1
+    platformVariantL = _2
+instance HasPlatform Config where
+    platformL = lens configPlatform (\x y -> x { configPlatform = y })
+    platformVariantL = lens configPlatformVariant (\x y -> x { configPlatformVariant = y })
+instance HasPlatform LoadConfig
+instance HasPlatform BuildConfig
+instance HasPlatform EnvConfig
+
+instance HasGHCVariant GHCVariant where
+    ghcVariantL = id
+    {-# INLINE ghcVariantL #-}
+instance HasGHCVariant BuildConfig where
+    ghcVariantL = lens bcGHCVariant (\x y -> x { bcGHCVariant = y })
+instance HasGHCVariant EnvConfig
+
+instance HasConfig Config where
+    configL = id
+    {-# INLINE configL #-}
+instance HasConfig LoadConfig where
+    configL = lens lcConfig (\x y -> x { lcConfig = y })
+instance HasConfig BuildConfig where
+    configL = lens bcConfig (\x y -> x { bcConfig = y })
+instance HasConfig EnvConfig
+
+instance HasBuildConfig BuildConfig where
+    buildConfigL = id
+    {-# INLINE buildConfigL #-}
+instance HasBuildConfig EnvConfig
+
+instance HasEnvConfig EnvConfig where
+    envConfigL = id
+    {-# INLINE envConfigL #-}
+
+instance HasRunner Config where
+  runnerL = lens configRunner (\x y -> x { configRunner = y })
+instance HasRunner LoadConfig where
+  runnerL = configL.runnerL
+instance HasRunner BuildConfig where
+  runnerL = configL.runnerL
+instance HasRunner EnvConfig where
+  runnerL = configL.runnerL
+
+instance HasLogFunc Config where
+  logFuncL = runnerL.logFuncL
+instance HasLogFunc LoadConfig where
+  logFuncL = runnerL.logFuncL
+instance HasLogFunc BuildConfig where
+  logFuncL = runnerL.logFuncL
+instance HasLogFunc EnvConfig where
+  logFuncL = runnerL.logFuncL
+
+-----------------------------------
+-- Helper lenses
+-----------------------------------
+
+stackRootL :: HasConfig s => Lens' s (Path Abs Dir)
+stackRootL = configL.lens configStackRoot (\x y -> x { configStackRoot = y })
+
+-- | The compiler specified by the @MiniBuildPlan@. This may be
+-- different from the actual compiler used!
+wantedCompilerVersionL :: HasBuildConfig s => Getting r s (CompilerVersion 'CVWanted)
+wantedCompilerVersionL = snapshotDefL.to sdWantedCompilerVersion
+
+-- | The version of the compiler which will actually be used. May be
+-- different than that specified in the 'MiniBuildPlan' and returned
+-- by 'wantedCompilerVersionL'.
+actualCompilerVersionL :: HasEnvConfig s => Lens' s (CompilerVersion 'CVActual)
+actualCompilerVersionL = envConfigL.lens
+    envConfigCompilerVersion
+    (\x y -> x { envConfigCompilerVersion = y })
+
+snapshotDefL :: HasBuildConfig s => Lens' s SnapshotDef
+snapshotDefL = buildConfigL.lens
+    bcSnapshotDef
+    (\x y -> x { bcSnapshotDef = y })
+
+packageIndicesL :: HasConfig s => Lens' s [PackageIndex]
+packageIndicesL = configL.lens
+    configPackageIndices
+    (\x y -> x { configPackageIndices = y })
+
+buildOptsL :: HasConfig s => Lens' s BuildOpts
+buildOptsL = configL.lens
+    configBuild
+    (\x y -> x { configBuild = y })
+
+buildOptsMonoidHaddockL :: Lens' BuildOptsMonoid (Maybe Bool)
+buildOptsMonoidHaddockL = lens (getFirst . buildMonoidHaddock)
+                            (\buildMonoid t -> buildMonoid {buildMonoidHaddock = First t})
+
+buildOptsMonoidTestsL :: Lens' BuildOptsMonoid (Maybe Bool)
+buildOptsMonoidTestsL = lens (getFirst . buildMonoidTests)
+                            (\buildMonoid t -> buildMonoid {buildMonoidTests = First t})
+
+buildOptsMonoidBenchmarksL :: Lens' BuildOptsMonoid (Maybe Bool)
+buildOptsMonoidBenchmarksL = lens (getFirst . buildMonoidBenchmarks)
+                            (\buildMonoid t -> buildMonoid {buildMonoidBenchmarks = First t})
+
+buildOptsMonoidInstallExesL :: Lens' BuildOptsMonoid (Maybe Bool)
+buildOptsMonoidInstallExesL =
+  lens (getFirst . buildMonoidInstallExes)
+       (\buildMonoid t -> buildMonoid {buildMonoidInstallExes = First t})
+
+buildOptsInstallExesL :: Lens' BuildOpts Bool
+buildOptsInstallExesL =
+  lens boptsInstallExes
+       (\bopts t -> bopts {boptsInstallExes = t})
+
+buildOptsHaddockL :: Lens' BuildOpts Bool
+buildOptsHaddockL =
+  lens boptsHaddock
+       (\bopts t -> bopts {boptsHaddock = t})
+
+globalOptsL :: Lens' GlobalOpts ConfigMonoid
+globalOptsL = lens globalConfigMonoid (\x y -> x { globalConfigMonoid = y })
+
+globalOptsBuildOptsMonoidL :: Lens' GlobalOpts BuildOptsMonoid
+globalOptsBuildOptsMonoidL = globalOptsL.lens
+    configMonoidBuildOpts
+    (\x y -> x { configMonoidBuildOpts = y })
+
+configUrlsL :: HasConfig env => Lens' env Urls
+configUrlsL = configL.lens configUrls (\x y -> x { configUrls = y })
+
+cabalVersionL :: HasEnvConfig env => Lens' env Version
+cabalVersionL = envConfigL.lens
+    envConfigCabalVersion
+    (\x y -> x { envConfigCabalVersion = y })
+
+loadedSnapshotL :: HasEnvConfig env => Lens' env LoadedSnapshot
+loadedSnapshotL = envConfigL.lens
+    envConfigLoadedSnapshot
+    (\x y -> x { envConfigLoadedSnapshot = y })
+
+whichCompilerL :: Getting r (CompilerVersion a) WhichCompiler
+whichCompilerL = to whichCompiler
+
+envOverrideL :: HasConfig env => Lens' env (EnvSettings -> IO EnvOverride)
+envOverrideL = configL.lens
+    configEnvOverride
+    (\x y -> x { configEnvOverride = y })
+
+shouldForceGhcColorFlag :: (HasRunner env, HasEnvConfig env)
+                        => RIO env Bool
+shouldForceGhcColorFlag = do
+    canDoColor <- (>= $(mkVersion "8.2.1")) . getGhcVersion
+              <$> view actualCompilerVersionL
+    shouldDoColor <- logUseColor <$> view logOptionsL
+    return $ canDoColor && shouldDoColor
+
+appropriateGhcColorFlag :: (HasRunner env, HasEnvConfig env)
+                        => RIO env (Maybe String)
+appropriateGhcColorFlag = f <$> shouldForceGhcColorFlag
+  where f True = Just ghcColorForceFlag
+        f False = Nothing

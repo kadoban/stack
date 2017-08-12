@@ -1,4 +1,6 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -14,25 +16,26 @@ module Stack.SetupCmd
 import           Control.Applicative
 import           Control.Monad.Logger
 import           Control.Monad.Reader
-import           Data.Monoid
 import qualified Data.Text as T
 import qualified Options.Applicative as OA
+import qualified Options.Applicative.Args as OA
 import qualified Options.Applicative.Builder.Extra as OA
 import qualified Options.Applicative.Types as OA
 import           Path
-import           Prelude -- silence redundant import warnings
+import           Stack.Prelude
 import           Stack.Setup
 import           Stack.Types.Compiler
 import           Stack.Types.Config
-import           Stack.Types.StackT
 import           Stack.Types.Version
 
 data SetupCmdOpts = SetupCmdOpts
-    { scoCompilerVersion :: !(Maybe CompilerVersion)
+    { scoCompilerVersion :: !(Maybe (CompilerVersion 'CVWanted))
     , scoForceReinstall  :: !Bool
-    , scoUpgradeCabal    :: !Bool
+    , scoUpgradeCabal    :: !(Maybe UpgradeTo)
     , scoSetupInfoYaml   :: !String
     , scoGHCBindistURL   :: !(Maybe String)
+    , scoGHCJSBootOpts   :: ![Text]
+    , scoGHCJSBootClean  :: !Bool
     }
 
 setupYamlCompatParser :: OA.Parser String
@@ -48,6 +51,22 @@ setupYamlCompatParser = stackSetupYaml <|> setupInfoYaml
             <> OA.metavar "URL"
             <> OA.value defaultSetupInfoYaml )
 
+cabalUpgradeParser :: OA.Parser UpgradeTo
+cabalUpgradeParser = Specific <$> version' <|> latestParser
+    where
+        versionReader = do
+            s <- OA.readerAsk
+            case parseVersion (T.pack s) of
+                Nothing -> OA.readerError $ "Invalid version: " ++ s
+                Just v  -> return v
+        version' = OA.option versionReader (
+            OA.long "install-cabal"
+         <> OA.metavar "VERSION"
+         <> OA.help "Install a specific version of Cabal" )
+        latestParser = OA.flag' Latest (
+            OA.long "upgrade-cabal"
+         <> OA.help "Install latest version of Cabal globally" )
+
 setupParser :: OA.Parser SetupCmdOpts
 setupParser = SetupCmdOpts
     <$> OA.optional (OA.argument readVersion
@@ -58,15 +77,20 @@ setupParser = SetupCmdOpts
             "reinstall"
             "reinstalling GHC, even if available (incompatible with --system-ghc)"
             OA.idm
-    <*> OA.boolFlags False
-            "upgrade-cabal"
-            "installing the newest version of the Cabal library globally"
-            OA.idm
+    <*> OA.optional cabalUpgradeParser
     <*> setupYamlCompatParser
     <*> OA.optional (OA.strOption
             (OA.long "ghc-bindist"
            <> OA.metavar "URL"
            <> OA.help "Alternate GHC binary distribution (requires custom --ghc-variant)"))
+    <*> OA.manyArgsOptions
+            (OA.long "ghcjs-boot-options"
+           <> OA.metavar "GHCJS_BOOT"
+           <> OA.help "Additional ghcjs-boot options")
+    <*> OA.boolFlags True
+            "ghcjs-boot-clean"
+            "Control if ghcjs-boot should have --clean option present"
+            OA.idm
   where
     readVersion = do
         s <- OA.readerAsk
@@ -78,15 +102,15 @@ setupParser = SetupCmdOpts
             Just x -> return x
 
 setup
-    :: (StackM env m, HasConfig env, HasGHCVariant env)
+    :: (HasConfig env, HasGHCVariant env)
     => SetupCmdOpts
-    -> CompilerVersion
+    -> CompilerVersion 'CVWanted
     -> VersionCheck
     -> Maybe (Path Abs File)
-    -> m ()
+    -> RIO env ()
 setup SetupCmdOpts{..} wantedCompiler compilerCheck mstack = do
-    Config{..} <- asks getConfig
-    mpaths <- fst <$> ensureCompiler SetupOpts
+    Config{..} <- view configL
+    (_, _, sandboxedGhc) <- ensureCompiler SetupOpts
         { soptsInstallIfMissing = True
         , soptsUseSystem = configSystemGHC && not scoForceReinstall
         , soptsWantedCompiler = wantedCompiler
@@ -100,13 +124,14 @@ setup SetupCmdOpts{..} wantedCompiler compilerCheck mstack = do
         , soptsResolveMissingGHC = Nothing
         , soptsSetupInfoYaml = scoSetupInfoYaml
         , soptsGHCBindistURL = scoGHCBindistURL
+        , soptsGHCJSBootOpts = map T.unpack scoGHCJSBootOpts ++ ["--clean" | scoGHCJSBootClean]
         }
     let compiler = case wantedCompiler of
             GhcVersion _ -> "GHC"
             GhcjsVersion {} -> "GHCJS"
-    case mpaths of
-        Nothing -> $logInfo $ "stack will use the " <> compiler <> " on your PATH"
-        Just _ -> $logInfo $ "stack will use a sandboxed " <> compiler <> " it installed"
+    if sandboxedGhc
+        then $logInfo $ "stack will use a sandboxed " <> compiler <> " it installed"
+        else $logInfo $ "stack will use the " <> compiler <> " on your PATH"
     $logInfo "For more information on paths, see 'stack path' and 'stack exec env'"
     $logInfo $ "To use this " <> compiler <> " and packages outside of a project, consider using:"
     $logInfo "stack ghc, stack ghci, stack runghc, or stack exec"

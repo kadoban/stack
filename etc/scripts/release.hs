@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE RecordWildCards #-}
 
 import Control.Applicative
@@ -103,7 +104,7 @@ options =
         "Label to give the uploaded release asset"
     , Option "" [noTestHaddocksOptName] (NoArg $ Right $ \g -> g{gTestHaddocks = False})
         "Disable testing building haddocks."
-    , Option "" [staticOptName] (NoArg $ Right $ \g -> g{gBuildArgs = gBuildArgs g ++ ["--split-objs", "--ghc-options=-optc-Os -optl-static -fPIC"]})
+    , Option "" [staticOptName] (NoArg $ Right $ \g -> g{gBuildArgs = gBuildArgs g ++ ["--flag=stack:static"]})
         "Build a static binary."
     , Option "" [buildArgsOptName]
         (ReqArg
@@ -136,9 +137,7 @@ rules global@Global{..} args = do
         mapM_ (\f -> need [releaseDir </> f]) binaryPkgFileNames
 
     distroPhonies ubuntuDistro ubuntuVersions debPackageFileName
-    distroPhonies debianDistro debianVersions debPackageFileName
     distroPhonies centosDistro centosVersions rpmPackageFileName
-    distroPhonies fedoraDistro fedoraVersions rpmPackageFileName
 
     releaseDir </> "*" <.> uploadExt %> \out -> do
         let srcFile = dropExtension out
@@ -155,16 +154,15 @@ rules global@Global{..} args = do
         when (not gAllowDirty && not (null (trim dirty))) $
             error ("Working tree is dirty.  Use --" ++ allowDirtyOptName ++ " option to continue anyway.")
         withTempDir $ \tmpDir -> do
-            let cmd0 c = cmd (releaseBinDir </> binaryName </> stackExeFileName)
+            let cmd0 c = cmd (gProjectRoot </> releaseBinDir </> binaryName </> stackExeFileName)
                     (stackArgs global)
                     ["--local-bin-path=" ++ tmpDir]
                     c
-                    gBuildArgs
-            () <- cmd0 "install" $ concat $ concat
+            () <- cmd0 "install" gBuildArgs $ concat $ concat
                 [["--pedantic --no-haddock-deps"], [" --haddock" | gTestHaddocks]]
-            () <- cmd0 "install" "--resolver=lts-6.0 cabal-install"
-            let cmd' c = cmd (AddPath [tmpDir] []) stackProgName (stackArgs global) c gBuildArgs
-            () <- cmd' "test" "--pedantic --flag stack:integration-tests"
+            () <- cmd0 (Cwd "etc/scripts") "install" "cabal-install"
+            let cmd' c = cmd (AddPath [tmpDir] []) stackProgName (stackArgs global) c
+            () <- cmd' "test" gBuildArgs "--pedantic --flag stack:integration-tests"
             return ()
         copyFileChanged (releaseBinDir </> binaryName </> stackExeFileName) out
 
@@ -175,7 +173,11 @@ rules global@Global{..} args = do
             entries <- forM stageFiles $ \stageFile -> do
                 Zip.readEntry
                     [Zip.OptLocation
+#if MIN_VERSION_zip_archive(0,3,0)
+                        (dropFileName (dropDirectoryPrefix (releaseStageDir </> binaryName) stageFile))
+#else
                         (dropDirectoryPrefix (releaseStageDir </> binaryName) stageFile)
+#endif
                         False]
                     stageFile
             let archive = foldr Zip.addEntryToArchive Zip.emptyArchive entries
@@ -221,7 +223,7 @@ rules global@Global{..} args = do
                 cmd "strip -o"
                     [out, releaseBinDir </> binaryName </> stackExeFileName]
 
-    releaseDir </> binaryPkgSignatureFileName %> \out -> do
+    releaseDir </> "*" <.> ascExt %> \out -> do
         need [out -<.> ""]
         _ <- liftIO $ tryJust (guard . isDoesNotExistError) (removeFile out)
         cmd ("gpg " ++ gpgOptions ++ " --detach-sig --armor")
@@ -240,9 +242,7 @@ rules global@Global{..} args = do
             (removeFile out)
 
     debDistroRules ubuntuDistro ubuntuVersions
-    debDistroRules debianDistro debianVersions
     rpmDistroRules centosDistro centosVersions
-    rpmDistroRules fedoraDistro fedoraVersions
 
   where
 
@@ -390,12 +390,12 @@ rules global@Global{..} args = do
     releaseBinDir = releaseDir </> "bin"
     distroVersionDir DistroVersion{..} = releaseDir </> dvDistro </> dvVersion
 
-    binaryPkgFileNames = [binaryPkgFileName, binaryPkgSignatureFileName]
-    binaryPkgSignatureFileName = binaryPkgFileName <.> ascExt
-    binaryPkgFileName =
+    binaryPkgFileNames = binaryPkgArchiveFileNames ++ binaryPkgSignatureFileNames
+    binaryPkgSignatureFileNames = map (<.> ascExt) binaryPkgArchiveFileNames
+    binaryPkgArchiveFileNames =
         case platformOS of
-            Windows -> binaryPkgZipFileName
-            _ -> binaryPkgTarGzFileName
+            Windows -> [binaryPkgZipFileName, binaryPkgTarGzFileName]
+            _ -> [binaryPkgTarGzFileName]
     binaryPkgZipFileName = binaryName <.> zipExt
     binaryPkgTarGzFileName = binaryName <.> tarGzExt
     binaryExeFileName = binaryName <.> exe
@@ -429,28 +429,14 @@ rules global@Global{..} args = do
     rpmPackageVersionStr _ = stackVersionStr global
 
     ubuntuVersions =
-        [ ("12.04", "precise")
-        , ("14.04", "trusty")
-        , ("14.10", "utopic")
-        , ("15.04", "vivid")
-        , ("15.10", "wily")
-        , ("16.04", "xenial")
-        , ("16.10", "yakkety") ]
-    debianVersions =
-        [ ("7", "wheezy")
-        , ("8", "jessie") ]
+        [ ("14.04", "trusty")
+        , ("16.04", "xenial") ]
     centosVersions =
         [ ("7", "el7")
         , ("6", "el6") ]
-    fedoraVersions =
-        [ ("22", "fc22")
-        , ("23", "fc23")
-        , ("24", "fc24") ]
 
     ubuntuDistro = "ubuntu"
-    debianDistro = "debian"
     centosDistro = "centos"
-    fedoraDistro = "fedora"
 
     anyDistroVersion distro = DistroVersion distro "*" "*"
 
@@ -505,7 +491,7 @@ uploadToGithubRelease global@Global{..} file mUploadLabel = do
 -- | Make a request to the Github API and return the response.
 callGithubApi :: Global -> RequestHeaders -> Maybe FilePath -> String -> IO L8.ByteString
 callGithubApi Global{..} headers mpostFile url = do
-    req0 <- parseUrl url
+    req0 <- parseUrlThrow url
     let authToken =
             fromMaybe
                 (error $
@@ -515,8 +501,7 @@ callGithubApi Global{..} headers mpostFile url = do
                 gGithubAuthToken
         req1 =
             req0
-                { checkStatus = \_ _ _ -> Nothing
-                , requestHeaders =
+                { requestHeaders =
                     [ (CI.mk $ S8.pack "Authorization", S8.pack $ "token " ++ authToken)
                     , (CI.mk $ S8.pack "User-Agent", S8.pack "commercialhaskell/stack") ] ++
                     headers }

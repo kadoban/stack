@@ -1,16 +1,17 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Stack.Options.BuildParser where
 
 import qualified Data.Map as Map
-import           Data.Monoid.Extra
-import           Data.Text (Text)
 import           Data.Version (showVersion)
 import           Options.Applicative
 import           Options.Applicative.Args
 import           Options.Applicative.Builder.Extra
 import           Paths_stack as Meta
+import           Stack.Options.Completion
 import           Stack.Options.PackageParser (readFlag)
+import           Stack.Prelude
 import           Stack.Types.Config
 import           Stack.Types.FlagName
 import           Stack.Types.PackageName
@@ -36,11 +37,11 @@ buildOptsParser cmd =
          ["-O0"]
          (long "fast" <>
           help "Turn off optimizations (-O0)") <*>
-     many
-         (textOption
-              (long "ghc-options" <>
-               metavar "OPTION" <>
-               help "Additional options passed to GHC"))) <*>
+     manyArgsOptions
+         (long "ghc-options" <>
+          metavar "OPTIONS" <>
+          completer ghcOptsCompleter <>
+          help "Additional options passed to GHC")) <*>
     flagsParser <*>
     (flag'
          BSOnlyDependencies
@@ -87,6 +88,7 @@ targetsParser =
     many
         (textArgument
              (metavar "TARGET" <>
+              completer targetCompleter <>
               help ("If none specified, use all local packages. " <>
                     "See https://docs.haskellstack.org/en/v" <>
                     showVersion Meta.version <>
@@ -99,6 +101,7 @@ flagsParser =
          (option
               readFlag
               (long "flag" <>
+               completer flagCompleter <>
                metavar "PACKAGE:[-]FLAG" <>
                help
                    ("Override flags set in stack.yaml " <>

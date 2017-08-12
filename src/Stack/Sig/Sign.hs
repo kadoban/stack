@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -16,25 +17,17 @@ Portability : POSIX
 
 module Stack.Sig.Sign (sign, signPackage, signTarBytes) where
 
-import Prelude ()
-import Prelude.Compat
-
 import qualified Codec.Archive.Tar as Tar
 import qualified Codec.Compression.GZip as GZip
-import           Control.Monad (when)
-import           Control.Monad.Catch
-import           Control.Monad.IO.Class
-import           Control.Monad.Logger
+import           Stack.Prelude
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy as L
-import           Data.Monoid ((<>))
 import qualified Data.Text as T
 import           Network.HTTP.Client (RequestBody (RequestBodyBS))
 import           Network.HTTP.Download
 import           Network.HTTP.Simple
 import           Network.HTTP.Types (methodPut)
 import           Path
-import           Path.IO
 import           Stack.Package
 import           Stack.Sig.GPG
 import           Stack.Types.PackageIdentifier
@@ -45,12 +38,13 @@ import qualified System.FilePath as FP
 -- service and a path to a tarball.
 sign
 #if __GLASGOW_HASKELL__ < 710
-    :: (Applicative m, MonadIO m, MonadLogger m, MonadMask m)
+    :: (Applicative m, MonadUnliftIO m, MonadLogger m, MonadThrow m)
 #else
-    :: (MonadIO m, MonadLogger m, MonadMask m)
+    :: (MonadUnliftIO m, MonadLogger m, MonadThrow m)
 #endif
     => String -> Path Abs File -> m Signature
 sign url filePath =
+    withRunInIO $ \run ->
     withSystemTempDir
         "stack"
         (\tempDir ->
@@ -64,7 +58,7 @@ sign url filePath =
                      Nothing -> throwM SigInvalidSDistTarBall
                      Just cabalPath -> do
                          pkg <- cabalFilePackageId (tempDir </> cabalPath)
-                         signPackage url pkg filePath)
+                         run (signPackage url pkg filePath))
   where
     extractCabalFile tempDir (Tar.Next entry entries) =
         case Tar.entryContent entry of
@@ -90,9 +84,9 @@ sign url filePath =
 -- the tarball with GPG.
 signTarBytes
 #if __GLASGOW_HASKELL__ < 710
-    :: (Applicative m, MonadIO m, MonadLogger m, MonadMask m)
+    :: (Applicative m, MonadUnliftIO m, MonadLogger m, MonadThrow m)
 #else
-    :: (MonadIO m, MonadLogger m, MonadMask m)
+    :: (MonadUnliftIO m, MonadLogger m, MonadThrow m)
 #endif
     => String -> Path Rel File -> L.ByteString -> m Signature
 signTarBytes url tarPath bs =

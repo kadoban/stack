@@ -13,7 +13,7 @@ import System.IO
 import System.IO.Error
 import System.Process
 import System.Exit
-import System.Info (os)
+import System.Info (arch, os)
 
 run' :: FilePath -> [String] -> IO ExitCode
 run' cmd args = do
@@ -173,8 +173,16 @@ exeExt = if isWindows then ".exe" else ""
 -- | Is the OS Windows?
 isWindows = os == "mingw32"
 
+-- | Is the OS Alpine Linux?
+getIsAlpine = doesFileExist "/etc/alpine-release"
+
+-- | Is the architecture ARM?
+isARM = arch == "arm"
+
 -- | To avoid problems with GHC version mismatch when a new LTS major
 -- version is released, pass this argument to @stack@ when running in
--- a global context.  The LTS major version here should match that of
--- the main @stack.yaml@.
-defaultResolverArg = "--resolver=lts-6.0"
+-- a global context. The LTS major version here should match that of
+-- the main @stack.yaml@ (and ordinarily be the `.0` minor version).
+--
+-- NOTE: currently using lts-8.22 instead of lts-8.0 because the `cyclic-test-deps` integration test is broken with lts-8.0 because a hackage metadata revision invalidated the snapshot (snapshot has `test-framework-quickcheck2-0.3.0.3` and `QuickCheck-2.9.2`, which used to be fine, but now test-framework-quickcheck2 was revised to have a `QuickCheck < 2.8` constraint).
+defaultResolverArg = "--resolver=lts-8.22"

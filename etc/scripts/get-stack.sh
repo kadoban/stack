@@ -7,19 +7,29 @@
 # or:
 #   'wget -qO- https://get.haskellstack.org/ | sh'
 #
+# By default, this installs 'stack' to '/usr/local/bin'.
+#
+# Arguments (use `... | sh -s - ARGUMENTS`)
+#
+# -q: reduce script's output
+# -f: force over-write even if 'stack' already installed
+# -d DESTDIR: change destination directory
+#
 # Make pull requests at:
 # https://github.com/commercialhaskell/stack/blob/master/etc/scripts/get-stack.sh
 #
 
 HOME_LOCAL_BIN="$HOME/.local/bin"
-USR_LOCAL_BIN="/usr/local/bin"
+DEFAULT_DEST="/usr/local/bin/stack"
+DEST=""
 QUIET=""
+FORCE=""
 STACK_TEMP_DIR=
 
 # creates a temporary directory, which will be cleaned up automatically
 # when the script finishes
 make_temp_dir() {
-  STACK_TEMP_DIR="$(mktemp -d)"
+  STACK_TEMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t stack)"
 }
 
 # cleanup the temporary directory if it's been created.  called automatically
@@ -51,6 +61,21 @@ post_install_separator() {
   info ""
 }
 
+# determines the the CPU's instruction set
+get_isa() {
+  if arch | grep -q arm ; then
+    echo arm
+  else
+    echo x86
+  fi
+}
+
+# exits with code 0 if arm ISA is detected as described above
+is_arm() {
+  test "$(get_isa)" = arm
+}
+
+
 # determines 64- or 32-bit architecture
 # if getconf is available, it will return the arch of the OS, as desired
 # if not, it will use uname to get the arch of the CPU, though the installed
@@ -79,16 +104,23 @@ is_64_bit() {
   test "$(get_arch)" = 64
 }
 
-# Adds a `sudo` prefix if sudo is available to execute the given command
+# prints a generic bindist notice
+print_bindist_notice() {
+  if [ -z "$1" ] ; then
+    info ""
+    info "Using generic bindist..."
+    info ""
+  else
+    info ""
+    info "Using generic $1 bindist..."
+    info ""
+  fi
+}
+
+# Adds a 'sudo' prefix if sudo is available to execute the given command
 # If not, the given command is run as is
 sudocmd() {
   $(command -v sudo) "$@"
-}
-
-# Adds the FPCo key to the keyring and adds the given repo to the apt sources
-add_apt_repo() {
-  echo "$1" | sudocmd tee /etc/apt/sources.list.d/fpco.list > /dev/null
-  sudocmd apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 575159689BEFB442
 }
 
 # Install dependencies for distros that use Apt
@@ -96,15 +128,6 @@ apt_install_dependencies() {
     info "Installing dependencies..."
     info ""
     apt_get_install_pkgs "$@"
-}
-
-# Install Stack package on for distros that use Apt
-apt_update_and_install() {
-    sudocmd apt-get update ${QUIET:+-qq}
-    apt_get_install_pkgs stack
-    post_install_separator
-    info "Installed 'stack' package."
-    info ""
 }
 
 # Attempts an install on Ubuntu via apt, if possible
@@ -118,83 +141,48 @@ do_ubuntu_install() {
     apt_install_dependencies g++ gcc libc6-dev libffi-dev libgmp-dev make xz-utils zlib1g-dev git gnupg
   }
 
-  if is_64_bit ; then
-    case "$1" in
-      16.10)
-        add_apt_repo 'deb http://download.fpcomplete.com/ubuntu yakkety main'
-        apt_update_and_install
-        ;;
-      16.04)
-        add_apt_repo 'deb http://download.fpcomplete.com/ubuntu xenial main'
-        apt_update_and_install
-        ;;
-      15.10)
-        add_apt_repo 'deb http://download.fpcomplete.com/ubuntu wily main'
-        apt_update_and_install
-        ;;
-      14.04)
-        add_apt_repo 'deb http://download.fpcomplete.com/ubuntu trusty main'
-        apt_update_and_install
-        ;;
-      12.04)
-        add_apt_repo 'deb http://download.fpcomplete.com/ubuntu precise main'
-        apt_update_and_install
-        ;;
-      *)
-        install_dependencies
-        info ""
-        info "No packages available for Ubuntu $1, using generic bindist..."
-        info ""
-        install_64bit_standard_binary
-        ;;
-    esac
+  if is_arm ; then
+    install_dependencies
+    print_bindist_notice
+    install_arm_binary
+  elif is_64_bit ; then
+    install_dependencies
+    print_bindist_notice
+    install_64bit_static_binary
   else
     install_dependencies
-    info ""
-    info "No packages available for 32-bit Ubuntu $1, using generic bindist..."
-    info ""
+    print_bindist_notice
     install_32bit_standard_binary
   fi
 
 }
 
-# Attempts an install on Debian via apt, if possible
+# Attempts an install on Debian.
 # Expects the single-number version as the first and only argument
 # If the version of Debian is unsupported, it attempts to copy the binary
 # and install the necessary dependencies explicitly.
 do_debian_install() {
+
   install_dependencies() {
     apt_install_dependencies g++ gcc libc6-dev libffi-dev libgmp-dev make xz-utils zlib1g-dev
   }
 
-  if is_64_bit ; then
-    case "$1" in
-      8*)
-        add_apt_repo 'deb http://download.fpcomplete.com/debian jessie main'
-        apt_update_and_install
-        ;;
-      7*)
-        add_apt_repo 'deb http://download.fpcomplete.com/debian wheezy main'
-        apt_update_and_install
-        ;;
-      *)
-        install_dependencies
-        info ""
-        info "No packages available for Debian $1, using generic bindist..."
-        info ""
-        install_64bit_standard_binary
-        ;;
-    esac
+  if is_arm ; then
+    install_dependencies
+    print_bindist_notice
+    install_arm_binary
+  elif is_64_bit ; then
+    install_dependencies
+    print_bindist_notice
+    install_64bit_static_binary
   else
     install_dependencies
-    info ""
-    info "No packages available for 32-bit Debian $1, using generic bindist..."
-    info ""
+    print_bindist_notice
     install_32bit_standard_binary
   fi
 }
 
-# Attempts an install on Fedora via dnf, if possible
+# Attempts an install on Fedora.
 # Expects the single-number version as the first and only argument
 # If the version of Fedora is unsupported, it attempts to copy the binary
 # and install the necessary dependencies explicitly.
@@ -202,46 +190,19 @@ do_fedora_install() {
   install_dependencies() {
     dnf_install_pkgs perl make automake gcc gmp-devel libffi zlib xz tar
   }
-  dnf_install_stack() {
-    dnf_install_pkgs stack
-    post_install_separator
-    info "Installed 'stack' package."
-    info ""
-  }
 
   if is_64_bit ; then
-    check_dl_tools
-    case "$1" in
-      "24"*)
-        dl_to_stdout https://download.fpcomplete.com/fedora/24/fpco.repo | sudocmd tee /etc/yum.repos.d/fpco.repo >/dev/null
-        dnf_install_stack
-        ;;
-      "23"*)
-        dl_to_stdout https://download.fpcomplete.com/fedora/23/fpco.repo | sudocmd tee /etc/yum.repos.d/fpco.repo >/dev/null
-        dnf_install_stack
-        ;;
-      "22"*)
-        dl_to_stdout https://download.fpcomplete.com/fedora/22/fpco.repo | sudocmd tee /etc/yum.repos.d/fpco.repo >/dev/null
-        dnf_install_stack
-        ;;
-      *)
-        install_dependencies "$1"
-        info ""
-        info "No packages available for Fedora $1, using generic bindist..."
-        info ""
-        install_64bit_standard_binary
-        ;;
-    esac
+    install_dependencies "$1"
+    print_bindist_notice
+    install_64bit_static_binary
   else
     install_dependencies "$1"
-    info ""
-    info "No packages available for 32-bit Fedora $1, using generic bindist..."
-    info ""
+    print_bindist_notice
     install_32bit_standard_binary
   fi
 }
 
-# Attempts an install on CentOS via yum, if possible
+# Attempts an install on CentOS.
 # Expects the single-number version as the first and only argument
 # If the version of CentOS is unsupported, it attempts to copy the binary
 # and install the necessary dependencies explicitly.
@@ -249,69 +210,33 @@ do_centos_install() {
   install_dependencies() {
     yum_install_pkgs perl make automake gcc gmp-devel libffi zlib xz tar
   }
-  install_package() {
-    yum_install_pkgs stack
-    post_install_separator
-    info "Installed 'stack' package."
-    info ""
-  }
 
   if is_64_bit ; then
-    check_dl_tools
-    case "$1" in
-      "7"|"7."*)
-        dl_to_stdout https://download.fpcomplete.com/centos/7/fpco.repo | sudocmd tee /etc/yum.repos.d/fpco.repo >/dev/null
-        install_package
-        ;;
-      "6"|"6."*)
-        dl_to_stdout https://download.fpcomplete.com/centos/6/fpco.repo | sudocmd tee /etc/yum.repos.d/fpco.repo >/dev/null
-        install_package
-        ;;
-      *)
-        install_dependencies
-        info ""
-        info "No packages available for CentOS/RHEL $1, using generic bindist..."
-        info ""
-        install_64bit_standard_binary
-        ;;
-    esac
+    install_dependencies
+    print_bindist_notice
+    install_64bit_static_binary
   else
     install_dependencies
     case "$1" in
       "6")
-        info ""
-        info "No packages available for 32-bit CentOS/RHEL $1, using genergic libgmp4 bindist..."
-        info ""
+        print_bindist_notice "libgmp4"
         install_32bit_gmp4_linked_binary
         ;;
       *)
-        info ""
-        info "No packages available for 32-bit CentOS/RHEL $1, using generic bindist..."
-        info ""
+        print_bindist_notice
         install_32bit_standard_binary
         ;;
     esac
   fi
 }
 
-# Attempts to install on Mac OS X.
+# Attempts to install on macOS.
 # If 'brew' exists, installs using Homebrew.  Otherwise, installs
 # the generic bindist.
 do_osx_install() {
-  #if has_brew ; then
-  #  info "Since you have 'brew', installing using Homebrew."
-  #  info ""
-  #  brew update
-  #  brew install haskell-stack
-  #  post_install_separator
-  #  info "Installed Homebrew 'haskell-stack' formula."
-  #  info ""
-  #else
-  #  info "Since you do not have 'brew', using generic bindist..."
-    info "Using generic bindist..."
-    info ""
-    install_64bit_osx_binary
-  #fi
+  info "Using generic bindist..."
+  info ""
+  install_64bit_osx_binary
   info "NOTE: You may need to run 'xcode-select --install' to set"
   info "      up the Xcode command-line tools, which Stack uses."
   info ""
@@ -321,7 +246,7 @@ do_osx_install() {
 # 'pkg install' and then downloads bindist.
 do_freebsd_install() {
   install_dependencies() {
-    sudocmd pkg install -y devel/gmake perl5 lang/gcc misc/compat8x misc/compat9x converters/libiconv ca_root_nss
+    pkg_install_pkgs devel/gmake perl5 lang/gcc misc/compat8x misc/compat9x converters/libiconv ca_root_nss
   }
   if is_64_bit ; then
     install_dependencies
@@ -338,9 +263,9 @@ do_alpine_install() {
   }
   install_dependencies
   if is_64_bit ; then
-      install_64bit_static_binary
+    install_64bit_static_binary
   else
-      install_32bit_standard_binary
+    die "Sorry, there is currently no 32-bit Alpine Linux binary available."
   fi
 }
 
@@ -350,8 +275,11 @@ do_sloppy_install() {
   info "This installer doesn't support your Linux distribution, trying generic"
   info "bindist..."
   info ""
-  if is_64_bit ; then
-      install_64bit_standard_binary
+
+  if is_arm ; then
+      install_arm_binary
+  elif is_64_bit ; then
+      install_64bit_static_binary
   else
       install_32bit_standard_binary
   fi
@@ -462,7 +390,7 @@ GETDISTRO
     ubuntu)
       do_ubuntu_install "$VERSION"
       ;;
-    debian|kali)
+    debian|kali|raspbian)
       do_debian_install "$VERSION"
       ;;
     fedora)
@@ -497,13 +425,16 @@ See http://docs.haskellstack.org/en/stable/install_and_upgrade/"
   esac
 }
 
-# Download a URL to stdout, for piping to another process or file,
-# using 'curl' or 'wget'.
-dl_to_stdout() {
+# Download a URL to file using 'curl' or 'wget'.
+dl_to_file() {
   if has_curl ; then
-    curl ${QUIET:+-sS} -L "$@"
+    if ! curl ${QUIET:+-sS} -L -o "$2" "$1"; then
+      die "curl download failed: $1"
+    fi
   elif has_wget ; then
-    wget ${QUIET:+-q} -O- "$@"
+    if ! wget ${QUIET:+-q} "-O$2" "$1"; then
+      die "wget download failed: $1"
+    fi
   else
     # should already have checked for this, otherwise this message will probably
     # not be displayed, since dl_to_stdout will be part of a pipeline
@@ -525,25 +456,46 @@ check_dl_tools() {
 install_from_bindist() {
     IFB_URL="https://www.stackage.org/stack/$1"
     check_dl_tools
-    #TODO: the checksum or GPG signature should be checked.
     make_temp_dir
 
-    dl_to_stdout "$IFB_URL" | tar xzf - -C "$STACK_TEMP_DIR"
-    sudocmd install -c -o 0 -g 0 -m 0755 "$STACK_TEMP_DIR"/*/stack "$USR_LOCAL_BIN/stack"
+    dl_to_file "$IFB_URL" "$STACK_TEMP_DIR/$1.bindist"
+    mkdir -p "$STACK_TEMP_DIR/$1"
+    if ! tar xzf "$STACK_TEMP_DIR/$1.bindist" -C "$STACK_TEMP_DIR/$1"; then
+      die "Extract bindist failed"
+    fi
+    STACK_TEMP_EXE="$STACK_TEMP_DIR/$(basename "$DEST")"
+    mv "$STACK_TEMP_DIR/$1"/*/stack "$STACK_TEMP_EXE"
+    destdir="$(dirname "$DEST")"
+    if [ ! -d "$destdir" ]; then
+        info "$destdir directory does not exist; creating it..."
+        # First try to create directory as current user, then try with sudo if it fails.
+        if ! mkdir -p "$destdir" 2>/dev/null; then
+            if ! sudocmd mkdir -p "$destdir"; then
+                die "Could not create directory: $DEST"
+            fi
+        fi
+    fi
+    # First attempt to install 'stack' as current user, then try with sudo if it fails
+    info "Installing Stack to: $DEST..."
+    if ! install -c -m 0755 "$STACK_TEMP_EXE" "$destdir" 2>/dev/null; then
+      if ! sudocmd install -c -o 0 -g 0 -m 0755 "$STACK_TEMP_EXE" "$destdir"; then
+        die "Install to $DEST failed"
+      fi
+    fi
 
     post_install_separator
-    info "Stack has been installed to: $USR_LOCAL_BIN/stack"
+    info "Stack has been installed to: $DEST"
     info ""
 
-    check_usr_local_bin_on_path
+    check_dest_on_path
+}
+
+install_arm_binary() {
+  install_from_bindist "linux-arm"
 }
 
 install_32bit_standard_binary() {
   install_from_bindist "linux-i386"
-}
-
-install_64bit_standard_binary() {
-  install_from_bindist "linux-x86_64"
 }
 
 install_64bit_static_binary() {
@@ -562,7 +514,7 @@ install_64bit_freebsd_binary() {
   install_from_bindist "freebsd-x86_64"
 }
 
-# Attempt to install packages using whichever of apt-get, dnf, or yum is
+# Attempt to install packages using whichever of apt-get, dnf, yum, or apk is
 # available.
 try_install_pkgs() {
   if has_apt_get ; then
@@ -580,22 +532,37 @@ try_install_pkgs() {
 
 # Install packages using apt-get
 apt_get_install_pkgs() {
-  sudocmd apt-get install -y ${QUIET:+-qq} "$@"
+  if ! sudocmd apt-get install -y ${QUIET:+-qq} "$@"; then
+    die "Installing apt packages failed.  Please run 'apt-get update' and try again."
+  fi
 }
 
 # Install packages using dnf
 dnf_install_pkgs() {
-  sudocmd dnf install -y ${QUIET:+-q} "$@"
+  if ! sudocmd dnf install -y ${QUIET:+-q} "$@"; then
+    die "Installing dnf packages failed.  Please run 'dnf check-update' and try again."
+  fi
 }
 
 # Install packages using yum
 yum_install_pkgs() {
-  sudocmd yum install -y ${QUIET:+-q} "$@"
+  if ! sudocmd yum install -y ${QUIET:+-q} "$@"; then
+    die "Installing yum packages failed.  Please run 'yum check-update' and try again."
+  fi
 }
 
 # Install packages using apk
 apk_install_pkgs() {
-  sudocmd apk add --update ${QUIET:+-q} "$@"
+  if ! sudocmd apk add --update ${QUIET:+-q} "$@"; then
+    die "Installing apk packages failed.  Please run 'apk update' and try again."
+  fi
+}
+
+# Install packages using pkg
+pkg_install_pkgs() {
+    if ! sudocmd pkg install -y "$@"; then
+        die "Installing pkg packages failed.  Please run 'pkg update' and try again."
+    fi
 }
 
 # Get installed Stack version, if any
@@ -689,9 +656,9 @@ check_home_local_bin_on_path() {
 }
 
 # Check whether /usr/local/bin is on the PATH, and print a warning if not.
-check_usr_local_bin_on_path() {
-  if ! on_path "$USR_LOCAL_BIN" ; then
-    info "WARNING: '$USR_LOCAL_BIN' is not on your PATH."
+check_dest_on_path() {
+  if ! on_path "$(dirname $DEST)" ; then
+    info "WARNING: '$(dirname $DEST)' is not on your PATH."
     info ""
   fi
 }
@@ -699,21 +666,49 @@ check_usr_local_bin_on_path() {
 # Check whether Stack is already installed, and print an error if it is.
 check_stack_installed() {
   if has_stack ; then
-    #XXX add a --force flag to reinstall anyway
-    die "Stack $(stack_version) already appears to be installed at:
+    if [ "$FORCE" = "true" ] ; then
+      [ "$DEST" != "" ] || DEST="$(stack_location)"
+    else
+      if has_curl; then
+        get="curl -sSL"
+      else
+        get="wget -qO-"
+      fi
+      die "Stack $(stack_version) already appears to be installed at:
   $(stack_location)
-Use 'stack upgrade' or your OS's package manager to upgrade."
+Use 'stack upgrade' or your OS's package manager to upgrade,
+or pass '-f' to this script to over-write the existing binary, e.g.:
+  $get https://get.haskellstack.org/ | sh -s - -f"
+    fi
+  else
+    [ "$DEST" != "" ] || DEST="$DEFAULT_DEST"
   fi
 }
 
 trap cleanup_temp_dir EXIT
 
-case "$1" in
-  -q|--quiet)
-    # This tries its best to reduce output by suppressing the script's own
-    # messages and passing "quiet" arguments to tools that support them.
-    QUIET="true"
-esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -q|--quiet)
+      # This tries its best to reduce output by suppressing the script's own
+      # messages and passing "quiet" arguments to tools that support them.
+      QUIET="true"
+      shift
+      ;;
+    -f|--force)
+      FORCE="true"
+      shift
+      ;;
+    -d|--dest)
+      DEST="$2/stack"
+      shift 2
+      ;;
+    *)
+      echo "Invalid argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 check_stack_installed
 do_os

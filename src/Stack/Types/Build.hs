@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DeriveDataTypeable         #-}
 {-# LANGUAGE DeriveGeneric              #-}
@@ -5,7 +6,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE ViewPatterns               #-}
 
 -- | Build-specific types.
 
@@ -17,8 +17,10 @@ module Stack.Types.Build
     ,ModTime
     ,modTime
     ,Installed(..)
-    ,PackageInstallInfo(..)
+    ,piiVersion
+    ,piiLocation
     ,Task(..)
+    ,taskIsTarget
     ,taskLocation
     ,LocalPackage(..)
     ,BaseConfigOpts(..)
@@ -36,6 +38,8 @@ module Stack.Types.Build
     ,ConfigCache(..)
     ,configCacheVC
     ,configureOpts
+    ,CachePkgSrc (..)
+    ,toCachePkgSrc
     ,isStackOpt
     ,wantedLocalPackages
     ,FileCacheInfo (..)
@@ -44,39 +48,31 @@ module Stack.Types.Build
     ,precompiledCacheVC)
     where
 
-import           Control.DeepSeq
-import           Control.Exception
-import           Data.Binary (Binary)
-import           Data.Binary.Tagged (HasSemanticVersion, HasStructuralInfo)
-import qualified Data.ByteString as S
-import           Data.Char (isSpace)
-import           Data.Data
-import           Data.Hashable
+import           Stack.Prelude
+import           Data.Binary                     (Binary)
+import           Data.Binary.Tagged              (HasSemanticVersion,
+                                                  HasStructuralInfo)
+import qualified Data.ByteString                 as S
+import           Data.Char                       (isSpace)
 import           Data.List.Extra
-import qualified Data.Map as Map
-import           Data.Map.Strict (Map)
-import           Data.Maybe
-import           Data.Monoid
-import           Data.Set (Set)
-import qualified Data.Set as Set
-import           Data.Store.Internal (Store)
+import qualified Data.Map                        as Map
+import qualified Data.Set                        as Set
 import           Data.Store.Version
 import           Data.Store.VersionTagged
-import           Data.Text (Text)
-import qualified Data.Text as T
-import           Data.Text.Encoding (decodeUtf8With)
-import           Data.Text.Encoding.Error (lenientDecode)
+import qualified Data.Text                       as T
+import           Data.Text.Encoding              (decodeUtf8With)
+import           Data.Text.Encoding.Error        (lenientDecode)
 import           Data.Time.Calendar
 import           Data.Time.Clock
+import           Data.Version                    (showVersion)
 import           Distribution.PackageDescription (TestSuiteInterface)
-import           Distribution.System (Arch)
-import qualified Distribution.Text as C
-import           GHC.Generics (Generic)
-import           Path (Path, Abs, File, Dir, mkRelDir, toFilePath, parseRelDir, (</>))
-import           Path.Extra (toFilePathNoTrailingSep)
-import           Prelude
+import           Distribution.System             (Arch)
+import qualified Distribution.Text               as C
+import           Path                            (mkRelDir, parseRelDir, (</>))
+import           Path.Extra                      (toFilePathNoTrailingSep)
+import           Paths_stack                     as Meta
 import           Stack.Constants
-import           Stack.Types.BuildPlan (GitSHA1)
+import           Stack.Types.BuildPlan           (PackageLocationIndex)
 import           Stack.Types.Compiler
 import           Stack.Types.CompilerBuild
 import           Stack.Types.Config
@@ -86,17 +82,17 @@ import           Stack.Types.Package
 import           Stack.Types.PackageIdentifier
 import           Stack.Types.PackageName
 import           Stack.Types.Version
-import           System.Exit (ExitCode (ExitFailure))
-import           System.FilePath (pathSeparator)
-import           System.Process.Log (showProcessArgDebug)
+import           System.Exit                     (ExitCode (ExitFailure))
+import           System.FilePath                 (pathSeparator)
+import           System.Process.Log              (showProcessArgDebug)
 
 ----------------------------------------------
 -- Exceptions
 data StackBuildException
   = Couldn'tFindPkgId PackageName
   | CompilerVersionMismatch
-        (Maybe (CompilerVersion, Arch)) -- found
-        (CompilerVersion, Arch) -- expected
+        (Maybe (CompilerVersion 'CVActual, Arch)) -- found
+        (CompilerVersion 'CVWanted, Arch) -- expected
         GHCVariant -- expected
         CompilerBuild -- expected
         VersionCheck
@@ -125,12 +121,12 @@ data StackBuildException
   | NoSetupHsFound (Path Abs Dir)
   | InvalidFlagSpecification (Set UnusedFlags)
   | TargetParseException [Text]
-  | DuplicateLocalPackageNames [(PackageName, [Path Abs Dir])]
   | SolverGiveUp String
   | SolverMissingCabalInstall
   | SomeTargetsNotBuildable [(PackageName, NamedComponent)]
   | TestSuiteExeMissing Bool String String String
   | CabalCopyFailed Bool String
+  | LocalPackagesPresent [PackageIdentifier]
   deriving Typeable
 
 data FlagSource = FSCommandLine | FSStackYaml
@@ -184,7 +180,10 @@ instance Show StackBuildException where
             | Set.null noKnown = []
             | otherwise = return $
                 "The following target packages were not found: " ++
-                intercalate ", " (map packageNameString $ Set.toList noKnown)
+                intercalate ", " (map packageNameString $ Set.toList noKnown) ++
+                "\nSee https://docs.haskellstack.org/en/v"
+                <> showVersion Meta.version <>
+                "/build_command/#target-syntax for details."
         notInSnapshot'
             | Map.null notInSnapshot = []
             | otherwise =
@@ -195,8 +194,8 @@ instance Show StackBuildException where
                 : "but there's no guarantee that they'll build together)."
                 : ""
                 : map
-                    (\(name, version) -> "- " ++ packageIdentifierString
-                        (PackageIdentifier name version))
+                    (\(name, version') -> "- " ++ packageIdentifierString
+                        (PackageIdentifier name version'))
                     (Map.toList notInSnapshot)
     show (TestSuiteFailure ident codes mlogFile bs) = unlines $ concat
         [ ["Test suite failure for package " ++ packageIdentifierString ident]
@@ -293,15 +292,6 @@ instance Show StackBuildException where
         $ "The following errors occurred while parsing the build targets:"
         : map (("- " ++) . T.unpack) errs
 
-    show (DuplicateLocalPackageNames pairs) = concat
-        $ "The same package name is used in multiple local packages\n"
-        : map go pairs
-      where
-        go (name, dirs) = unlines
-            $ ""
-            : (packageNameString name ++ " used in:")
-            : map goDir dirs
-        goDir dir = "- " ++ toFilePath dir
     show (SolverGiveUp msg) = concat
         [ "\nSolver could not resolve package dependencies.\n"
         , "You can try the following:\n"
@@ -331,6 +321,9 @@ instance Show StackBuildException where
             , "\n"
             ]
     show (ConstructPlanFailed msg) = msg
+    show (LocalPackagesPresent locals) = unlines
+      $ "Local packages are not allowed when using the script command. Packages found:"
+      : map (\ident -> "- " ++ packageIdentifierString ident) locals
 
 missingExeError :: Bool -> String -> String
 missingExeError isSimpleBuildType msg =
@@ -356,8 +349,8 @@ newtype PkgDepsOracle =
     deriving (Show,Typeable,Eq,Hashable,Store,NFData)
 
 -- | Stored on disk to know whether the files have changed.
-data BuildCache = BuildCache
-    { buildCacheTimes :: !(Map FilePath FileCacheInfo)
+newtype BuildCache = BuildCache
+    { buildCacheTimes :: Map FilePath FileCacheInfo
       -- ^ Modification times of files.
     }
     deriving (Generic, Eq, Show, Data, Typeable)
@@ -382,13 +375,23 @@ data ConfigCache = ConfigCache
       -- is a convenient way to force compilation when the components change.
     , configCacheHaddock :: !Bool
       -- ^ Are haddocks to be built?
+    , configCachePkgSrc :: !CachePkgSrc
     }
     deriving (Generic, Eq, Show, Data, Typeable)
 instance Store ConfigCache
 instance NFData ConfigCache
 
+data CachePkgSrc = CacheSrcUpstream | CacheSrcLocal FilePath
+    deriving (Generic, Eq, Show, Data, Typeable)
+instance Store CachePkgSrc
+instance NFData CachePkgSrc
+
+toCachePkgSrc :: PackageSource -> CachePkgSrc
+toCachePkgSrc (PSLocal lp) = CacheSrcLocal (toFilePath (lpDir lp))
+toCachePkgSrc PSUpstream{} = CacheSrcUpstream
+
 configCacheVC :: VersionConfig ConfigCache
-configCacheVC = storeVersionConfig "config-v1" "NMEzMXpksE1h7STRzlQ2f6Glkjo="
+configCacheVC = storeVersionConfig "config-v3" "z7N_NxX7Gbz41Gi9AGEa1zoLE-4="
 
 -- | A task to perform when building
 data Task = Task
@@ -401,6 +404,7 @@ data Task = Task
     -- ^ GhcPkgIds of already-installed dependencies
     , taskAllInOne        :: !Bool
     -- ^ indicates that the package can be built in one step
+    , taskCachePkgSrc     :: !CachePkgSrc
     }
     deriving Show
 
@@ -422,8 +426,14 @@ instance Show TaskConfigOpts where
 -- | The type of a task, either building local code or something from the
 -- package index (upstream)
 data TaskType = TTLocal LocalPackage
-              | TTUpstream Package InstallLocation (Maybe GitSHA1)
+              | TTUpstream Package InstallLocation (PackageLocationIndex FilePath) -- FIXME major overhaul for PackageLocation?
     deriving Show
+
+taskIsTarget :: Task -> Bool
+taskIsTarget t =
+    case taskType t of
+        TTLocal lp -> lpWanted lp
+        _ -> False
 
 taskLocation :: Task -> InstallLocation
 taskLocation task =
@@ -436,7 +446,7 @@ data Plan = Plan
     { planTasks :: !(Map PackageName Task)
     , planFinals :: !(Map PackageName Task)
     -- ^ Final actions to be taken (test, benchmark, etc)
-    , planUnregisterLocal :: !(Map GhcPkgId (PackageIdentifier, Maybe Text))
+    , planUnregisterLocal :: !(Map GhcPkgId (PackageIdentifier, Text))
     -- ^ Text is reason we're unregistering, for display only
     , planInstallExes :: !(Map Text InstallLocation)
     -- ^ Executables that should be installed after successful building
@@ -484,10 +494,13 @@ isStackOpt t = any (`T.isPrefixOf` t)
     , "--haddockdir="
     , "--enable-tests"
     , "--enable-benchmarks"
-    , "--enable-library-profiling"
-    , "--enable-executable-profiling"
-    , "--enable-profiling"
     , "--exact-configuration"
+    -- Treat these as causing dirtiness, to resolve
+    -- https://github.com/commercialhaskell/stack/issues/2984
+    --
+    -- , "--enable-library-profiling"
+    -- , "--enable-executable-profiling"
+    -- , "--enable-profiling"
     ] || t == "--user"
 
 configureOptsDirs :: BaseConfigOpts
@@ -546,15 +559,15 @@ configureOptsNoDir econfig bco deps isLocal package = concat
                        flagNameString name)
                     (Map.toList flags)
     , concatMap (\x -> [compilerOptionsCabalFlag wc, T.unpack x]) (packageGhcOptions package)
-    , map (("--extra-include-dirs=" ++) . toFilePathNoTrailingSep) (Set.toList (configExtraIncludeDirs config))
-    , map (("--extra-lib-dirs=" ++) . toFilePathNoTrailingSep) (Set.toList (configExtraLibDirs config))
+    , map ("--extra-include-dirs=" ++) (Set.toList (configExtraIncludeDirs config))
+    , map ("--extra-lib-dirs=" ++) (Set.toList (configExtraLibDirs config))
     , maybe [] (\customGcc -> ["--with-gcc=" ++ toFilePath customGcc]) (configOverrideGccPath config)
-    , ["--ghcjs" | whichCompiler (envConfigCompilerVersion econfig) == Ghcjs]
+    , ["--ghcjs" | wc == Ghcjs]
     , ["--exact-configuration" | useExactConf]
     ]
   where
-    wc = whichCompiler (envConfigCompilerVersion econfig)
-    config = getConfig econfig
+    wc = view (actualCompilerVersionL.to whichCompiler) econfig
+    config = view configL econfig
     bopts = bcoBuildOpts bco
 
     -- TODO: instead always enable this when the cabal version is new
@@ -562,7 +575,7 @@ configureOptsNoDir econfig bco deps isLocal package = concat
     -- earlier. Cabal also might do less work then.
     useExactConf = configAllowNewer config
 
-    newerCabal = envConfigCabalVersion econfig >= $(mkVersion "1.22")
+    newerCabal = view cabalVersionL econfig >= $(mkVersion "1.22")
 
     -- Unioning atop defaults is needed so that all flags are specified
     -- with --exact-configuration.
@@ -584,10 +597,10 @@ configureOptsNoDir econfig bco deps isLocal package = concat
         [ "--constraint="
         , packageNameString name
         , "=="
-        , versionString version
+        , versionString version'
         ]
       where
-        PackageIdentifier name version = ident
+        PackageIdentifier name version' = ident
 
 -- | Get set of wanted package names from locals.
 wantedLocalPackages :: [LocalPackage] -> Set PackageName
