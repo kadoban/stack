@@ -165,6 +165,10 @@ compilation, but subsequent change/build cycles should be quicker on average.
 Note: please remember to turn this flag off before you distribute/use a stack
 binary in production. The git info is very helpful to have in submitted bug reports.
 
+Also remember that if your flags differ between various build commands, that typically
+results in extra recompilation. So if you are consistent about what flags are set,
+you'll save yourself some time.
+
 ### Using GHCi
 
 You may also load tests into GHCi and run them with:
