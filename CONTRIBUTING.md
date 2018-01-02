@@ -92,25 +92,45 @@ The Stack code has both unit tests and integration tests. Integration tests can
 be found in the [test/integration](https://github.com/commercialhaskell/stack/tree/master/test/integration)
 folder and unit tests, in the [src/test](https://github.com/commercialhaskell/stack/tree/master/src/test)
 folder. Tests are written using the [Hspec](https://hspec.github.io/) framework. In
-order to run the full test suite, you can simply do:
+order to run the tests, you can simply do:
 
 ```bash
 $ stack test
 ```
 
-The `--file-watch` is a very useful option to get quick feedback. However,
-running the entire test suite after each file change will slow you down. You'll
-need to specify which test suite (unit test or integration) and pass arguments
-to specify which module you'd specifically like to run to get quick feedback. A
-description of this follows below.
-
-### Working with Unit Tests
-
-If you would like to run the unit tests on their own, you can:
+Note: By default, the integration tests are disabled. To turn them on you must set
+the `integration-tests` flag, like so:
 
 ```bash
-$ stack test stack:stack-test
+$ stack test --flag stack:integration-tests
 ```
+
+This will then run *all* of the tests (not just the integration tests).
+
+You may notice that toggling a flag like this results in a lot of recompilation, so
+if you want to occasionally run the integration tests, you might consider always
+having the flag set and simply choosing manually which test suite to run.
+
+Thus ```stack test stack:stack-test --flag stack:integration-tests``` will run
+just the unit tests, without requiring so much recompilation next time you want to
+run all tests.
+
+For completeness, if you want to run *just* the integration tests, you can do that
+by specifying both the flag and the component.
+
+```stack test stack:stack-integration-test --flag stack:integration-tests```
+
+### File Watch
+
+The `--file-watch` option is very useful for getting quick feedback. For example,
+`stack test --file-watch` will re-run the test suite every time you change any
+file.
+
+Running the entire test suite (including the integration tests) after each file change
+will slow you down, so you may consider just running the unit tests or choosing a
+specific integration test to run.
+
+### Working with Individual Tests
 
 Running an individual module works like this:
 
@@ -120,25 +140,7 @@ $ stack test stack:stack-test --ta "-m <PATTERN>"
 
 Where `<PATTERN>` is the name of the module without `Spec.hs`.
 
-You may also load tests into GHCi and run them with:
-
-```bash
-$ stack ghci stack:stack-test --only-main
-# GHCi starting up output ...
-> :main -m "<PATTERN>"
-```
-
-Where again, `<PATTERN>` is the name of the module without `Spec.hs`.
-
-### Working with Integration Tests
-
-Running the integration tests is a little involved, you'll need to:
-
-```bash
-$ stack test stack:integration-test --flag stack:stack-integration-tests
-```
-
-Running an individual module works like this:
+Or for the integration tests, you can similarly do:
 
 ```bash
 $ stack test stack:stack-integration-test --flag stack:integration-tests --ta "-m <PATTERN>"
@@ -148,18 +150,38 @@ Where `<PATTERN>` is the name of the folder listed in the
 [test/integration/tests/](https://github.com/commercialhaskell/stack/tree/master/test/integration/tests)
 folder.
 
-You may also achieve this through GHCi with:
+### Reducing Recompilation
+
+You may sometimes find that modules are being rebuilt that you never touched.
+This should happen less often if you turn off the automatic inclusion of git
+information in the stack build. This is done via the `disable-git-info` flag.
+For example:
+
+```stack test --flag stack:integration-tests --flag stack:disable-git-info```
+
+On the first build after you turn on this flag, it will likely result in even more
+compilation, but subsequent change/build cycles should be quicker on average.
+
+Note: please remember to turn this flag off before you distribute/use a stack
+binary in production. The git info is very helpful to have in submitted bug reports.
+
+### Using GHCi
+
+You may also load tests into GHCi and run them with:
+
+```bash
+$ stack ghci stack:stack-test --only-main
+# GHCi starting up output ...
+> :main -m "<PATTERN>"
+```
+
+or
 
 ```bash
 $ stack ghci stack:stack-integration-test
 # GHCi starting up output ...
 > :main -m "<PATTERN>"
 ```
-
-Where again, `<PATTERN>` is the name of the folder listed in the
-[test/integration/tests/](https://github.com/commercialhaskell/stack/tree/master/test/integration/tests)
-folder.
-
 
 ## Slack channel
 
